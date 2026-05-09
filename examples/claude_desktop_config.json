@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "research": {
+      "command": "research-mcp",
+      "args": ["serve"],
+      "env": {
+        "OPENAI_API_KEY": "sk-...",
+        "RESEARCH_MCP_INDEX_PATH": "/Users/you/research_index",
+        "SEMANTIC_SCHOLAR_API_KEY": ""
+      }
+    }
+  }
+}
