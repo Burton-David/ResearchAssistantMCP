@@ -20,13 +20,17 @@ git clone https://github.com/burton-david/research-mcp
 cd research-mcp
 uv sync                                    # or: pip install -e ".[dev]"
 
+# search and cite work with no env vars at all:
+research-mcp search "transformer scaling laws" --max 10
+research-mcp cite arxiv:1706.03762 --format ama
+
+# ingesting and recalling needs an embedder + a place to put the index:
 export OPENAI_API_KEY=sk-...
 export RESEARCH_MCP_INDEX_PATH=~/research_index
-export SEMANTIC_SCHOLAR_API_KEY=...        # optional, for higher rate limits
+export SEMANTIC_SCHOLAR_API_KEY=...        # optional, raises S2 rate limit
 
 research-mcp serve                         # stdio MCP server
 research-mcp repl                          # IPython with abstractions wired
-research-mcp search "transformer scaling laws" --max 10
 ```
 
 ## Claude Desktop config
@@ -78,9 +82,17 @@ research-mcp repl            # interactive REPL
 
 The project follows REPL-first development: prove a pattern works in `research-mcp repl` before refactoring it into a module. The four core protocols are stable; new abstractions get added only when usage demands them.
 
+## Comparison
+
+**vs. raw arXiv API access.** A direct arXiv call gives you XML you have to parse on every script, no rate-limit handling, no caching, no Semantic Scholar fallback, no local recall. `research-mcp` adds adapters that already speak `Paper`, a process-local rate limiter, a 24-hour disk cache, and protocol-based extension points so adding IEEE / OpenAlex / a local PDF folder is a single new class.
+
+**vs. LangChain's research tools.** LangChain bundles retrieval, prompting, and memory under a deep class hierarchy that you opt into wholesale. `research-mcp` is the retrieval half *only*, exposed as MCP tools — the LLM does the prompting and orchestration in whatever client you prefer (Claude Desktop, Claude Code, Cursor, Continue). Four `typing.Protocol` abstractions instead of LangChain's BaseRetriever / BaseEmbeddings / VectorStore inheritance trees; a third-party `Source` is a single class with no registration step.
+
+**vs. running an LLM agent against the web.** Web search is ranked for clicks. arXiv and Semantic Scholar are ranked for relevance against scientific literature; ingest-then-recall lets the model build a stable, semantically-indexed corpus across sessions instead of re-searching every time.
+
 ## Status
 
-Alpha. Interfaces may change before 1.0. PRs welcome.
+Alpha. Interfaces may change before 1.0. PRs welcome — see [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## License
 

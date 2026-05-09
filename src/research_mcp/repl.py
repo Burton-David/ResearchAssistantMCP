@@ -16,9 +16,6 @@ import asyncio
 import sys
 from typing import Any
 
-from IPython import start_ipython
-from traitlets.config import Config
-
 from research_mcp.citation import RENDERERS
 from research_mcp.domain import (
     Author,
@@ -94,6 +91,16 @@ def build_namespace(*, use_openai: bool = False) -> dict[str, Any]:
 
 
 def main(argv: list[str] | None = None) -> None:
+    try:
+        from IPython import start_ipython
+        from traitlets.config import Config
+    except ImportError as exc:
+        raise SystemExit(
+            "research-mcp repl requires IPython. Install dev deps:\n"
+            "    pip install 'research-mcp[dev]'\n"
+            "or just `pip install ipython`."
+        ) from exc
+
     args = list(argv if argv is not None else sys.argv[1:])
     use_openai = "--openai" in args
     if use_openai:
