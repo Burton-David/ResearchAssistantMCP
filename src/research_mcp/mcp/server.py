@@ -17,6 +17,7 @@ import mcp.types as mcp_types
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
 
+from research_mcp import __version__
 from research_mcp.citation import RENDERERS
 from research_mcp.domain.citation import CitationFormat
 from research_mcp.domain.paper import Paper
@@ -48,7 +49,7 @@ def build_server(
     paper_lookup: Callable[[str], Awaitable[Paper | None]],
 ) -> Server[Any, Any]:
     """Construct an MCP `Server` with the four research tools registered."""
-    server: Server[Any, Any] = Server("research-mcp")
+    server: Server[Any, Any] = Server("research-mcp", version=__version__)
 
     # mcp SDK ships its decorators as untyped at the moment.
     @server.list_tools()  # type: ignore[no-untyped-call,untyped-decorator]
