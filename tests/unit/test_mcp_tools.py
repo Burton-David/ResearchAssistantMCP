@@ -31,6 +31,24 @@ def test_max_results_capped_at_100() -> None:
         SearchPapersInput.model_validate({"query": "x", "max_results": 9999})
 
 
+def test_year_min_accepts_string_int() -> None:
+    """Models often serialize numeric tool args as strings — coerce, don't reject.
+
+    The pydantic default lax mode handles this; we disable the mcp SDK's
+    jsonschema layer (which doesn't coerce) so this path actually runs.
+    """
+    parsed = SearchPapersInput.model_validate(
+        {"query": "BERT", "year_min": "2018", "year_max": "2020"}
+    )
+    assert parsed.year_min == 2018
+    assert parsed.year_max == 2020
+
+
+def test_year_min_accepts_real_int() -> None:
+    parsed = SearchPapersInput.model_validate({"query": "BERT", "year_min": 2018})
+    assert parsed.year_min == 2018
+
+
 def test_ingest_paper_input_requires_id() -> None:
     with pytest.raises(ValidationError):
         IngestPaperInput.model_validate({})
@@ -56,3 +74,17 @@ def test_paper_to_summary_handles_minimal_paper(vaswani_paper) -> None:  # type:
     assert summary.id == vaswani_paper.id
     assert summary.year == 2017
     assert summary.authors[0] == "Ashish Vaswani"
+
+
+def test_library_status_input_takes_no_args() -> None:
+    from research_mcp.mcp.tools import LibraryStatusInput
+
+    parsed = LibraryStatusInput.model_validate({})
+    assert parsed is not None
+
+
+def test_library_status_input_rejects_unknown_field() -> None:
+    from research_mcp.mcp.tools import LibraryStatusInput
+
+    with pytest.raises(ValidationError):
+        LibraryStatusInput.model_validate({"unexpected": "x"})

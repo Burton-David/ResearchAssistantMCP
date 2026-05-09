@@ -52,6 +52,10 @@ class CitePaperInput(_Strict):
     )
 
 
+class LibraryStatusInput(_Strict):
+    """No arguments. Reports library size without requiring an ingest call."""
+
+
 class PaperSummary(BaseModel):
     id: str
     title: str
@@ -80,6 +84,10 @@ class IngestPaperOutput(BaseModel):
 class CitePaperOutput(BaseModel):
     citation: str
     format: CitationFormatLiteral
+
+
+class LibraryStatusOutput(BaseModel):
+    count: int
 
 
 def paper_to_summary(paper: Paper) -> PaperSummary:

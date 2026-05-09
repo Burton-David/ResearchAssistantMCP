@@ -32,6 +32,8 @@ from research_mcp.mcp.tools import (
     IngestPaperOutput,
     LibrarySearchInput,
     LibrarySearchOutput,
+    LibraryStatusInput,
+    LibraryStatusOutput,
     SearchPapersInput,
     SearchPapersOutput,
     paper_to_summary,
@@ -87,6 +89,15 @@ def build_server(
                 ),
                 inputSchema=CitePaperInput.model_json_schema(),
             ),
+            mcp_types.Tool(
+                name="library_status",
+                description=(
+                    "Report the number of papers currently in the local "
+                    "library. Useful for verifying ingest state without "
+                    "needing to ingest another paper."
+                ),
+                inputSchema=LibraryStatusInput.model_json_schema(),
+            ),
         ]
 
     async def _do_search(arguments: dict[str, Any]) -> dict[str, Any]:
@@ -129,14 +140,26 @@ def build_server(
             format=args.format,
         ).model_dump()
 
+    async def _do_status(arguments: dict[str, Any]) -> dict[str, Any]:
+        LibraryStatusInput.model_validate(arguments)
+        return LibraryStatusOutput(count=await library.count()).model_dump()
+
     handlers: dict[str, Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]] = {
         "search_papers": _do_search,
         "ingest_paper": _do_ingest,
         "library_search": _do_recall,
         "cite_paper": _do_cite,
+        "library_status": _do_status,
     }
 
-    @server.call_tool()  # type: ignore[untyped-decorator]  # mcp SDK decorators are untyped
+    # validate_input=False bypasses the mcp SDK's strict jsonschema check so
+    # pydantic — which is doing the same job inside each handler — gets first
+    # crack at the arguments. The motivation is concrete: model clients
+    # frequently serialize numeric tool args as JSON strings ("2018" instead
+    # of 2018). jsonschema rejects those as type-mismatched; pydantic's
+    # default lax mode coerces them. extra="forbid" on each Input model still
+    # bounces hallucinated unknown keys, so we don't lose schema strictness.
+    @server.call_tool(validate_input=False)  # type: ignore[untyped-decorator]  # mcp SDK decorators are untyped
     async def call_tool(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         handler = handlers.get(name)
         if handler is None:
