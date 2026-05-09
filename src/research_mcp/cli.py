@@ -40,6 +40,9 @@ class _CliLibrary:
 @click.pass_context
 def main(ctx: click.Context) -> None:
     """research-mcp — MCP server and CLI for research workflows."""
+    from research_mcp._env import load_dotenv
+
+    load_dotenv()
     if ctx.invoked_subcommand is None:
         ctx.invoke(serve)
 

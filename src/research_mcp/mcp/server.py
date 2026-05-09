@@ -212,6 +212,9 @@ async def run_in_memory() -> None:
 
 
 async def main() -> None:
+    from research_mcp._env import load_dotenv
+
+    load_dotenv()
     if os.environ.get("RESEARCH_MCP_TEST_MODE") == "1":
         await run_in_memory()
     else:
