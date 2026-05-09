@@ -27,10 +27,6 @@ class LibraryService:
         embedder: Embedder,
         ingest_source: Source,
     ) -> None:
-        if index.dimension != embedder.dimension:
-            raise ValueError(
-                f"index dim {index.dimension} != embedder dim {embedder.dimension}"
-            )
         self._index = index
         self._embedder = embedder
         self._ingest_source = ingest_source

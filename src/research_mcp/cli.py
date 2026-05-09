@@ -10,8 +10,8 @@ from __future__ import annotations
 import asyncio
 import os
 import sys
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Callable
 
 import click
 
@@ -20,6 +20,7 @@ from research_mcp.domain.citation import CitationFormat
 from research_mcp.domain.embedder import Embedder
 from research_mcp.domain.index import Index
 from research_mcp.domain.query import SearchQuery
+from research_mcp.domain.source import Source
 from research_mcp.embedder import FakeEmbedder, OpenAIEmbedder
 from research_mcp.index import FaissIndex, MemoryIndex
 from research_mcp.service import LibraryService, SearchService
@@ -70,8 +71,9 @@ def search(query: str, max_results: int, source: str) -> None:
 
 
 async def _search(query: str, max_results: int, source: str) -> None:
-    sources = []
-    arxiv = s2 = None
+    sources: list[Source] = []
+    arxiv: ArxivSource | None = None
+    s2: SemanticScholarSource | None = None
     if source in {"arxiv", "all"}:
         arxiv = ArxivSource()
         sources.append(arxiv)

@@ -22,7 +22,6 @@ from pathlib import Path
 
 import faiss  # type: ignore[import-untyped]  # faiss-cpu has no type stubs
 import numpy as np
-import numpy.typing as npt
 
 from research_mcp.domain.paper import Paper
 from research_mcp.index._codec import paper_from_dict, paper_to_dict

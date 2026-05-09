@@ -50,7 +50,7 @@ def _render_authors(paper: Paper) -> str:
         return ""
     formatted = [ama_author(a) for a in paper.authors]
     if len(formatted) > _MAX_AUTHORS_BEFORE_ETAL:
-        formatted = formatted[:_MAX_AUTHORS_BEFORE_ETAL] + ["et al"]
+        formatted = [*formatted[:_MAX_AUTHORS_BEFORE_ETAL], "et al"]
     return ", ".join(formatted)
 
 

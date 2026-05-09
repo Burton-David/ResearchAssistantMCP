@@ -8,11 +8,11 @@ from research_mcp.citation.mla import MLARenderer
 from research_mcp.citation.registry import RENDERERS, get_renderer
 
 __all__ = [
+    "RENDERERS",
     "AMARenderer",
     "APARenderer",
     "BibtexRenderer",
     "ChicagoRenderer",
     "MLARenderer",
-    "RENDERERS",
     "get_renderer",
 ]

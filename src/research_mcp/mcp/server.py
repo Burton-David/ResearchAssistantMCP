@@ -21,6 +21,7 @@ from research_mcp.citation import RENDERERS
 from research_mcp.domain.citation import CitationFormat
 from research_mcp.domain.paper import Paper
 from research_mcp.domain.query import SearchQuery
+from research_mcp.domain.source import Source
 from research_mcp.embedder import FakeEmbedder, OpenAIEmbedder
 from research_mcp.index import FaissIndex, MemoryIndex
 from research_mcp.mcp.tools import (
@@ -49,7 +50,8 @@ def build_server(
     """Construct an MCP `Server` with the four research tools registered."""
     server: Server[Any, Any] = Server("research-mcp")
 
-    @server.list_tools()
+    # mcp SDK ships its decorators as untyped at the moment.
+    @server.list_tools()  # type: ignore[no-untyped-call,untyped-decorator]
     async def list_tools() -> list[mcp_types.Tool]:
         return [
             mcp_types.Tool(
@@ -86,48 +88,59 @@ def build_server(
             ),
         ]
 
-    @server.call_tool()
+    async def _do_search(arguments: dict[str, Any]) -> dict[str, Any]:
+        args = SearchPapersInput.model_validate(arguments)
+        papers = await search.search(
+            SearchQuery(
+                text=args.query,
+                max_results=args.max_results,
+                year_min=args.year_min,
+                year_max=args.year_max,
+            )
+        )
+        return SearchPapersOutput(
+            results=[paper_to_summary(p) for p in papers]
+        ).model_dump()
+
+    async def _do_ingest(arguments: dict[str, Any]) -> dict[str, Any]:
+        args = IngestPaperInput.model_validate(arguments)
+        paper = await library.ingest(args.paper_id)
+        return IngestPaperOutput(
+            paper=paper_to_summary(paper),
+            library_count=await library.count(),
+        ).model_dump()
+
+    async def _do_recall(arguments: dict[str, Any]) -> dict[str, Any]:
+        args = LibrarySearchInput.model_validate(arguments)
+        results = await library.recall(args.query, k=args.k)
+        return LibrarySearchOutput(
+            results=[(paper_to_summary(p), score) for p, score in results]
+        ).model_dump()
+
+    async def _do_cite(arguments: dict[str, Any]) -> dict[str, Any]:
+        args = CitePaperInput.model_validate(arguments)
+        paper = await paper_lookup(args.paper_id)
+        if paper is None:
+            raise ValueError(f"paper not found for id {args.paper_id!r}")
+        renderer = RENDERERS[CitationFormat(args.format)]
+        return CitePaperOutput(
+            citation=renderer.render(paper),
+            format=args.format,
+        ).model_dump()
+
+    handlers: dict[str, Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]] = {
+        "search_papers": _do_search,
+        "ingest_paper": _do_ingest,
+        "library_search": _do_recall,
+        "cite_paper": _do_cite,
+    }
+
+    @server.call_tool()  # type: ignore[untyped-decorator]  # mcp SDK decorators are untyped
     async def call_tool(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
-        if name == "search_papers":
-            args = SearchPapersInput.model_validate(arguments)
-            papers = await search.search(
-                SearchQuery(
-                    text=args.query,
-                    max_results=args.max_results,
-                    year_min=args.year_min,
-                    year_max=args.year_max,
-                )
-            )
-            output = SearchPapersOutput(results=[paper_to_summary(p) for p in papers])
-            return output.model_dump()
-
-        if name == "ingest_paper":
-            args = IngestPaperInput.model_validate(arguments)
-            paper = await library.ingest(args.paper_id)
-            output = IngestPaperOutput(
-                paper=paper_to_summary(paper),
-                library_count=await library.count(),
-            )
-            return output.model_dump()
-
-        if name == "library_search":
-            args = LibrarySearchInput.model_validate(arguments)
-            results = await library.recall(args.query, k=args.k)
-            output = LibrarySearchOutput(
-                results=[(paper_to_summary(p), score) for p, score in results]
-            )
-            return output.model_dump()
-
-        if name == "cite_paper":
-            args = CitePaperInput.model_validate(arguments)
-            paper = await paper_lookup(args.paper_id)
-            if paper is None:
-                raise ValueError(f"paper not found for id {args.paper_id!r}")
-            renderer = RENDERERS[CitationFormat(args.format)]
-            output = CitePaperOutput(citation=renderer.render(paper), format=args.format)
-            return output.model_dump()
-
-        raise ValueError(f"unknown tool: {name}")
+        handler = handlers.get(name)
+        if handler is None:
+            raise ValueError(f"unknown tool: {name}")
+        return await handler(arguments)
 
     return server
 
@@ -146,7 +159,7 @@ async def run_default() -> None:
     index = FaissIndex(index_path, dimension=embedder.dimension)
     library = LibraryService(index=index, embedder=embedder, ingest_source=arxiv)
     search = SearchService([arxiv, s2])
-    sources_by_prefix = {"arxiv": arxiv, "s2": s2, "doi": s2}
+    sources_by_prefix: dict[str, Source] = {"arxiv": arxiv, "s2": s2, "doi": s2}
 
     async def paper_lookup(paper_id: str) -> Paper | None:
         prefix = paper_id.split(":", 1)[0]
