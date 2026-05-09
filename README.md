@@ -40,19 +40,17 @@ Add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
 ```json
 {
   "mcpServers": {
-    "research": {
-      "command": "research-mcp",
-      "args": ["serve"],
-      "env": {
-        "OPENAI_API_KEY": "sk-...",
-        "RESEARCH_MCP_INDEX_PATH": "/Users/you/research_index"
-      }
+    "research-mcp": {
+      "command": "/absolute/path/to/research-mcp/.venv/bin/research-mcp",
+      "args": ["serve"]
     }
   }
 }
 ```
 
-Restart Claude Desktop. New tools appear: `search_papers`, `ingest_paper`, `library_search`, `cite_paper`.
+Use the absolute path to the `research-mcp` binary — Claude Desktop won't have your venv on `$PATH`. The server auto-loads `.env` from the project root, so you don't need an `env` block in this file as long as `OPENAI_API_KEY` and `RESEARCH_MCP_INDEX_PATH` live there. Prefer that over inlining secrets into the desktop config.
+
+Restart Claude Desktop (⌘Q, not just close the window). New tools appear: `search_papers`, `ingest_paper`, `library_search`, `cite_paper`.
 
 ## Architecture
 
