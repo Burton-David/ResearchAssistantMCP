@@ -57,7 +57,8 @@ def apa_author(author: Author) -> str:
     return f"{surname}, {bits}"
 
 
-def chicago_author(author: Author) -> str:
+def chicago_author_inverted(author: Author) -> str:
+    """First-author form for Chicago/MLA: 'Surname, Given Middle'."""
     surname, given = split_name(author.name)
     if not surname:
         return author.name.strip()
@@ -65,8 +66,19 @@ def chicago_author(author: Author) -> str:
     return f"{surname}, {given_str}".rstrip(", ")
 
 
-def mla_author(author: Author) -> str:
-    return chicago_author(author)
+def chicago_author_normal(author: Author) -> str:
+    """Subsequent-author form for Chicago: 'Given Middle Surname'."""
+    surname, given = split_name(author.name)
+    if not surname and not given:
+        return author.name.strip()
+    given_str = " ".join(given)
+    return f"{given_str} {surname}".strip()
+
+
+# MLA convention matches Chicago for the first author; both formats only
+# apply normal-order names from the second author onward.
+mla_author_inverted = chicago_author_inverted
+mla_author_normal = chicago_author_normal
 
 
 def join_with_and(parts: list[str]) -> str:

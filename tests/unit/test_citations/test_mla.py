@@ -18,14 +18,15 @@ def test_vaswani_golden(vaswani_paper: Paper) -> None:
     assert MLARenderer().render(vaswani_paper) == expected
 
 
-def test_two_authors_use_and() -> None:
+def test_two_authors_first_inverted_second_normal() -> None:
     p = Paper(
         id="x:1",
         title="T",
         abstract="",
         authors=(Author("Alice Smith"), Author("Bob Jones")),
     )
-    assert "Smith, Alice and Jones, Bob" in MLARenderer().render(p)
+    # MLA: first author inverted, second in normal order
+    assert "Smith, Alice and Bob Jones" in MLARenderer().render(p)
 
 
 def test_renders_empty_paper_without_raising() -> None:

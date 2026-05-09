@@ -7,7 +7,11 @@ For preprints, the volume/issue block is omitted and arXiv stands in for the jou
 
 from __future__ import annotations
 
-from research_mcp.citation._format import chicago_author, join_with_and
+from research_mcp.citation._format import (
+    chicago_author_inverted,
+    chicago_author_normal,
+    join_with_and,
+)
 from research_mcp.domain.citation import CitationFormat
 from research_mcp.domain.paper import Paper
 
@@ -35,8 +39,11 @@ class ChicagoRenderer:
 
 
 def _render_authors(paper: Paper) -> str:
-    formatted = [chicago_author(a) for a in paper.authors]
-    return join_with_and(formatted)
+    if not paper.authors:
+        return ""
+    head = chicago_author_inverted(paper.authors[0])
+    tail = [chicago_author_normal(a) for a in paper.authors[1:]]
+    return join_with_and([head, *tail])
 
 
 def _ensure_period(s: str) -> str:
