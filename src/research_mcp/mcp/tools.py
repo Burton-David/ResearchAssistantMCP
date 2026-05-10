@@ -7,9 +7,9 @@ for tests; the server returns plain dicts via `model_dump`.
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from research_mcp.domain.citation import CitationFormat
 from research_mcp.domain.paper import Paper
@@ -21,11 +21,39 @@ class _Strict(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+def _reject_blank(value: str) -> str:
+    if not value.strip():
+        raise ValueError("must contain non-whitespace characters")
+    return value
+
+
+# Reusable validated query string: rejects "", "   ", "\n\n" up front so the
+# user gets a real error instead of a silent empty result list.
+NonBlankStr = Annotated[str, Field(..., min_length=1)]
+
+
 class SearchPapersInput(_Strict):
-    query: str = Field(..., min_length=1, description="Free-form search text.")
+    query: NonBlankStr = Field(..., description="Free-form search text.")
     max_results: int = Field(20, ge=1, le=100, description="Maximum results to return.")
     year_min: int | None = Field(None, description="Earliest publication year (inclusive).")
     year_max: int | None = Field(None, description="Latest publication year (inclusive).")
+
+    @field_validator("query")
+    @classmethod
+    def _query_not_blank(cls, value: str) -> str:
+        return _reject_blank(value)
+
+    @model_validator(mode="after")
+    def _year_range_well_ordered(self) -> SearchPapersInput:
+        if (
+            self.year_min is not None
+            and self.year_max is not None
+            and self.year_min > self.year_max
+        ):
+            raise ValueError(
+                f"year_min ({self.year_min}) must not exceed year_max ({self.year_max})"
+            )
+        return self
 
 
 class IngestPaperInput(_Strict):
@@ -37,8 +65,13 @@ class IngestPaperInput(_Strict):
 
 
 class LibrarySearchInput(_Strict):
-    query: str = Field(..., min_length=1, description="Free-form recall text.")
+    query: NonBlankStr = Field(..., description="Free-form recall text.")
     k: int = Field(10, ge=1, le=100, description="How many neighbors to return.")
+
+    @field_validator("query")
+    @classmethod
+    def _query_not_blank(cls, value: str) -> str:
+        return _reject_blank(value)
 
 
 class CitePaperInput(_Strict):

@@ -26,6 +26,35 @@ def test_search_papers_rejects_empty_query() -> None:
         SearchPapersInput.model_validate({"query": ""})
 
 
+def test_search_papers_rejects_whitespace_only_query() -> None:
+    """Pure whitespace passes min_length=1 — we want to reject it explicitly."""
+    with pytest.raises(ValidationError) as exc:
+        SearchPapersInput.model_validate({"query": "   \n\t  "})
+    assert "non-whitespace" in str(exc.value)
+
+
+def test_library_search_rejects_whitespace_only_query() -> None:
+    from research_mcp.mcp.tools import LibrarySearchInput
+
+    with pytest.raises(ValidationError):
+        LibrarySearchInput.model_validate({"query": "   "})
+
+
+def test_year_max_below_year_min_rejected() -> None:
+    with pytest.raises(ValidationError) as exc:
+        SearchPapersInput.model_validate(
+            {"query": "x", "year_min": 2024, "year_max": 2018}
+        )
+    assert "year_min" in str(exc.value)
+
+
+def test_year_equal_min_max_accepted() -> None:
+    parsed = SearchPapersInput.model_validate(
+        {"query": "x", "year_min": 2020, "year_max": 2020}
+    )
+    assert parsed.year_min == 2020 and parsed.year_max == 2020
+
+
 def test_max_results_capped_at_100() -> None:
     with pytest.raises(ValidationError):
         SearchPapersInput.model_validate({"query": "x", "max_results": 9999})
