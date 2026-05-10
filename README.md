@@ -8,10 +8,15 @@ LLMs are good at synthesis and bad at sourcing. Off-the-shelf web search returns
 
 ## What it does
 
-- **Search** — arXiv and Semantic Scholar, with optional year and author filters.
-- **Ingest** — pull a paper's metadata (and full text where available) into a local FAISS index keyed by canonical IDs.
-- **Recall** — semantic search over your local library, returning top-k papers with similarity scores.
-- **Cite** — render any paper as AMA, APA, MLA, Chicago, or BibTeX.
+Seven MCP tools the LLM calls directly:
+
+- **`search_papers`** — arXiv and Semantic Scholar in parallel, with cross-source enrichment (DOI from S2 doesn't get thrown away when arXiv is the first source) and provenance tracking (each result tells you which adapter(s) contributed).
+- **`find_paper`** — title-and-author lookup that re-ranks search hits by Jaccard similarity. Use this when you have a citation but no canonical id.
+- **`ingest_paper`** — pull a paper's metadata into a local FAISS index keyed by canonical id (`arxiv:`, `doi:`, `s2:`).
+- **`library_search`** — semantic recall over your local library, top-k with similarity scores.
+- **`cite_paper`** — render any paper as AMA, APA, MLA, Chicago, or BibTeX. Fetches metadata on demand; ingest not required.
+- **`get_paper`** — preview full Paper metadata for an id without ingesting.
+- **`library_status`** — paper count, configured embedder, setup hints if anything's missing.
 
 ## Quick start
 
@@ -20,18 +25,31 @@ git clone https://github.com/burton-david/research-mcp
 cd research-mcp
 uv sync                                    # or: pip install -e ".[dev]"
 
-# search and cite work with no env vars at all:
+# search, find, cite, get_paper work with no env vars at all:
 research-mcp search "transformer scaling laws" --max 10
 research-mcp cite arxiv:1706.03762 --format ama
 
-# ingesting and recalling needs an embedder + a place to put the index:
+# ingesting and recalling needs an embedder + a place to put the index.
+# Pick ONE embedder by setting RESEARCH_MCP_EMBEDDER:
+export RESEARCH_MCP_EMBEDDER="openai:text-embedding-3-small"
 export OPENAI_API_KEY=sk-...
+
+# ...or run fully offline with sentence-transformers (one-time ~440MB download):
+pip install 'research-mcp[sentence-transformers]'
+export RESEARCH_MCP_EMBEDDER="sentence-transformers:BAAI/bge-base-en-v1.5"
+
+# Either way, set where the FAISS index lives:
 export RESEARCH_MCP_INDEX_PATH=~/research_index
 export SEMANTIC_SCHOLAR_API_KEY=...        # optional, raises S2 rate limit
 
 research-mcp serve                         # stdio MCP server
 research-mcp repl                          # IPython with abstractions wired
 ```
+
+If you skip the embedder env var, the server still starts in degraded
+mode: `search_papers`, `find_paper`, `cite_paper`, `get_paper`, and
+`library_status` work; `ingest_paper` and `library_search` refuse with a
+hint pointing at the env vars to set.
 
 ## Claude Desktop config
 
@@ -50,7 +68,7 @@ Add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
 
 Use the absolute path to the `research-mcp` binary — Claude Desktop won't have your venv on `$PATH`. The server auto-loads `.env` from the project root, so you don't need an `env` block in this file as long as `OPENAI_API_KEY` and `RESEARCH_MCP_INDEX_PATH` live there. Prefer that over inlining secrets into the desktop config.
 
-Restart Claude Desktop (⌘Q, not just close the window). New tools appear: `search_papers`, `ingest_paper`, `library_search`, `cite_paper`.
+Restart Claude Desktop (⌘Q, not just close the window). Seven tools appear: `search_papers`, `find_paper`, `ingest_paper`, `library_search`, `cite_paper`, `get_paper`, `library_status`.
 
 ## Architecture
 
