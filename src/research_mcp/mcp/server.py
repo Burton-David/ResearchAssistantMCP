@@ -15,11 +15,12 @@ without needing API keys or a writable index path.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import time
 from collections.abc import Awaitable, Callable
-from typing import Any
+from typing import Any, Final
 
 import mcp.types as mcp_types
 from mcp.server import Server
@@ -103,6 +104,33 @@ from research_mcp.sources import (
 )
 
 _log = logging.getLogger(__name__)
+
+# Per-tool timeout ceilings. Claude Desktop hard-kills tool calls at
+# ~4 minutes (240s); we surface our own TIMEOUT error well before that
+# so the user sees a clean failure rather than an opaque Desktop drop.
+# Budgets are tuned to per-tool worst-case latency:
+#   - simple metadata fetches: 60s (one source x ~30s + retries)
+#   - multi-source merges: 90s (4 sources in parallel + reranker)
+#   - LLM-backed tools: 150s (single LLM call + downstream search)
+#   - corpus-write tools: 180s (search + N ingests; legitimately slow)
+_DEFAULT_TOOL_TIMEOUT: Final = 90.0
+_TOOL_TIMEOUTS: Final[dict[str, float]] = {
+    "search_papers": 90.0,
+    "find_paper": 90.0,
+    "cite_paper": 60.0,
+    "get_paper": 60.0,
+    "library_status": 10.0,
+    "library_search": 60.0,
+    "ingest_paper": 90.0,
+    "bulk_ingest": 180.0,
+    "chunk_paper": 60.0,
+    "extract_claims": 90.0,
+    "find_citations": 150.0,
+    "score_citation": 60.0,
+    "explain_citation": 60.0,
+    "analyze_paper": 150.0,
+    "assist_draft": 180.0,
+}
 
 _CITATION_UNAVAILABLE_HINT = (
     "citation tools unavailable: no citation service configured. The "
@@ -596,17 +624,39 @@ def build_server(
 
     async def _do_status(arguments: dict[str, Any]) -> dict[str, Any]:
         LibraryStatusInput.model_validate(arguments)
+        source_names = [s.name for s in search.sources]
+        extractor_name = (
+            claim_extractor.name if claim_extractor is not None else None
+        )
+        analyzer_name = (
+            analysis_service.analyzer.name
+            if analysis_service is not None
+            else None
+        )
+        scorer_name = (
+            citation_service.scorer.name
+            if citation_service is not None
+            else None
+        )
         if library is None:
             return LibraryStatusOutput(
                 count=0,
                 embedder=None,
                 reranker=reranker_label,
+                sources=source_names,
+                claim_extractor=extractor_name,
+                paper_analyzer=analyzer_name,
+                citation_scorer=scorer_name,
                 note=_NO_EMBEDDER_HINT,
             ).model_dump()
         return LibraryStatusOutput(
             count=await library.count(),
             embedder=embedder_label,
             reranker=reranker_label,
+            sources=source_names,
+            claim_extractor=extractor_name,
+            paper_analyzer=analyzer_name,
+            citation_scorer=scorer_name,
             note=None,
         ).model_dump()
 
@@ -896,8 +946,20 @@ def build_server(
         # log for tool=cite_paper and reconstruct the call sequence.
         arg_keys = ",".join(sorted(arguments.keys())) or "-"
         start = time.monotonic()
+        budget = _TOOL_TIMEOUTS.get(name, _DEFAULT_TOOL_TIMEOUT)
         try:
-            result = await handler(arguments)
+            result = await asyncio.wait_for(handler(arguments), timeout=budget)
+        except TimeoutError as exc:
+            elapsed_ms = (time.monotonic() - start) * 1000
+            _log.warning(
+                "tool=%s args=%s elapsed=%.0fms timeout_after=%.0fs",
+                name, arg_keys, elapsed_ms, budget,
+            )
+            raise ValueError(
+                f"{name} timed out after {budget:.0f}s. This is usually "
+                "an upstream rate limit or LLM API slowdown — try again "
+                "in a moment, or simplify the query."
+            ) from exc
         except ValidationError as exc:
             # Pydantic's default __str__ embeds a docs URL
             # (https://errors.pydantic.dev/...) in the message. That leaks

@@ -112,15 +112,27 @@ class ArxivSource:
 
 
 def _build_search_string(query: SearchQuery) -> str:
-    parts: list[str] = []
+    """Compose arxiv's `search_query` string.
+
+    Surprising arxiv quirk: the `submittedDate:` filter is silently
+    ignored when AND'd AFTER an `all:` clause. Putting it FIRST makes
+    arxiv's Lucene parser actually honor the bound. Verified via REPL
+    shootout — variant 'all:X AND submittedDate:[...]' returns post-
+    bound papers; 'submittedDate:[...] AND all:X' filters correctly.
+    """
+    text_parts: list[str] = []
     if query.text:
-        parts.append(f"all:{query.text}")
+        text_parts.append(f"all:{query.text}")
     for author in query.authors:
-        parts.append(f'au:"{author}"')
+        text_parts.append(f'au:"{author}"')
+
+    parts: list[str] = []
     if query.year_min is not None or query.year_max is not None:
-        lo = f"{query.year_min}01010000" if query.year_min else "00000101000"
-        hi = f"{query.year_max}12312359" if query.year_max else "99991231235"
+        # Format MUST be exactly YYYYMMDDHHMM (12 chars per side).
+        lo = f"{query.year_min:04d}01010000" if query.year_min else "190001010000"
+        hi = f"{query.year_max:04d}12312359" if query.year_max else "999912312359"
         parts.append(f"submittedDate:[{lo} TO {hi}]")
+    parts.extend(text_parts)
     return " AND ".join(parts) if parts else "all:*"
 
 

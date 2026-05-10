@@ -383,3 +383,104 @@ def test_select_claim_extractor_garbled_returns_none(
 
     monkeypatch.setenv("RESEARCH_MCP_CLAIM_EXTRACTOR", "frobnicate")
     assert _select_claim_extractor() is None
+
+
+def test_arxiv_search_string_puts_date_first() -> None:
+    """arxiv silently ignores the submittedDate filter when AND'd AFTER
+    an `all:` clause. Lock the fixed ordering down so a future refactor
+    can't reintroduce the bug."""
+    from research_mcp.domain.query import SearchQuery
+    from research_mcp.sources.arxiv import _build_search_string
+
+    s = _build_search_string(
+        SearchQuery(text="alphafold", max_results=5, year_min=2020, year_max=2022)
+    )
+    # Date clause must come FIRST.
+    assert s.startswith("submittedDate:[")
+    assert "all:alphafold" in s
+    assert s.index("submittedDate") < s.index("all:")
+
+
+def test_arxiv_search_string_uses_12_char_date_format() -> None:
+    """arxiv's submittedDate accepts exactly YYYYMMDDHHMM (12 chars).
+    Catch off-by-one length regressions."""
+    from research_mcp.domain.query import SearchQuery
+    from research_mcp.sources.arxiv import _build_search_string
+
+    s = _build_search_string(SearchQuery(text="x", year_min=2020, year_max=2022))
+    # Inner brackets contain "<lo> TO <hi>" — both must be 12 chars.
+    assert "submittedDate:[202001010000 TO 202212312359]" in s
+
+
+def test_arxiv_search_string_handles_only_year_min() -> None:
+    """Year_min set, year_max not — upper bound should be a far-future
+    sentinel (year 9999), not None or an empty string."""
+    from research_mcp.domain.query import SearchQuery
+    from research_mcp.sources.arxiv import _build_search_string
+
+    s = _build_search_string(SearchQuery(text="x", year_min=2020))
+    assert "submittedDate:[202001010000 TO 999912312359]" in s
+
+
+def test_arxiv_search_string_handles_only_year_max() -> None:
+    from research_mcp.domain.query import SearchQuery
+    from research_mcp.sources.arxiv import _build_search_string
+
+    s = _build_search_string(SearchQuery(text="x", year_max=2022))
+    assert "submittedDate:[190001010000 TO 202212312359]" in s
+
+
+def test_library_status_output_carries_source_list_and_extractor() -> None:
+    """Diagnostics tool must report which sources / extractor / analyzer /
+    scorer are wired so a user can verify the env config without scraping
+    result attribution."""
+    from research_mcp.mcp.tools import LibraryStatusOutput
+
+    out = LibraryStatusOutput(
+        count=10,
+        embedder="openai:text-embedding-3-small",
+        reranker="cross-encoder:BAAI/bge-reranker-base",
+        sources=["arxiv", "semantic_scholar", "pubmed", "openalex"],
+        claim_extractor="llm:openai:gpt-4o-mini",
+        paper_analyzer="openai:gpt-4o-mini",
+        citation_scorer="heuristic",
+    )
+    payload = out.model_dump()
+    assert payload["sources"] == ["arxiv", "semantic_scholar", "pubmed", "openalex"]
+    assert payload["claim_extractor"] == "llm:openai:gpt-4o-mini"
+    assert payload["paper_analyzer"] == "openai:gpt-4o-mini"
+    assert payload["citation_scorer"] == "heuristic"
+
+
+def test_openai_extractor_passes_timeout_to_client_when_constructed() -> None:
+    """Verify the explicit per-attempt timeout flows through to the SDK.
+    SDK default is 600s; we override to 60s to keep tool calls under
+    Claude Desktop's 4-min hard kill."""
+    from openai import AsyncOpenAI
+
+    from research_mcp.claim_extractor import OpenAILLMClaimExtractor
+
+    e = OpenAILLMClaimExtractor(api_key="sk-test", timeout=42.0)
+    assert isinstance(e._client, AsyncOpenAI)
+    # The SDK normalizes a float to its `timeout` attribute. Either a
+    # raw float or a Timeout object should be acceptable; both must
+    # represent 42 seconds.
+    timeout_attr = e._client.timeout
+    if isinstance(timeout_attr, int | float):
+        assert float(timeout_attr) == 42.0
+    else:
+        assert float(timeout_attr.read) == 42.0
+
+
+def test_anthropic_extractor_passes_timeout_to_client_when_constructed() -> None:
+    from anthropic import AsyncAnthropic
+
+    from research_mcp.claim_extractor import AnthropicLLMClaimExtractor
+
+    e = AnthropicLLMClaimExtractor(api_key="sk-test", timeout=42.0)
+    assert isinstance(e._client, AsyncAnthropic)
+    timeout_attr = e._client.timeout
+    if isinstance(timeout_attr, int | float):
+        assert float(timeout_attr) == 42.0
+    else:
+        assert float(timeout_attr.read) == 42.0

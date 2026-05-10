@@ -34,6 +34,10 @@ _log = logging.getLogger(__name__)
 
 _DEFAULT_MODEL: Final = "claude-haiku-4-5-20251001"
 _DEFAULT_MAX_RETRIES: Final = 4
+# See OpenAILLMClaimExtractor for the rationale: Anthropic SDK default
+# is 600s x 4 retries; that's enough to wedge an MCP call past Claude
+# Desktop's hard kill. 60s is generous for claim extraction.
+_DEFAULT_TIMEOUT_SECONDS: Final = 60.0
 # Claim lists for a 20K-char paragraph rarely exceed 50 entries. Cap on
 # tokens generously so the model has room for verbose context fields.
 _DEFAULT_MAX_TOKENS: Final = 4096
@@ -48,6 +52,7 @@ class AnthropicLLMClaimExtractor:
         model: str = _DEFAULT_MODEL,
         api_key: str | None = None,
         max_retries: int = _DEFAULT_MAX_RETRIES,
+        timeout: float = _DEFAULT_TIMEOUT_SECONDS,
         max_tokens: int = _DEFAULT_MAX_TOKENS,
         client: AsyncAnthropic | None = None,
     ) -> None:
@@ -57,6 +62,7 @@ class AnthropicLLMClaimExtractor:
         self._client = client or AsyncAnthropic(
             api_key=api_key or os.environ.get("ANTHROPIC_API_KEY"),
             max_retries=max_retries,
+            timeout=timeout,
         )
 
     async def extract(self, text: str) -> Sequence[Claim]:

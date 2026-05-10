@@ -39,6 +39,12 @@ _log = logging.getLogger(__name__)
 
 _DEFAULT_MODEL: Final = "gpt-4o-mini"
 _DEFAULT_MAX_RETRIES: Final = 4
+# Explicit per-attempt timeout. The OpenAI SDK default is 600s, which
+# gives 4 retries x 600s = 40 minutes worst case before surfacing a
+# failure — long enough to wedge an MCP tool call past Claude
+# Desktop's ~4-min hard kill. 60s comfortably covers a normal
+# claim-extraction call (~2-5s) plus headroom for tail latency.
+_DEFAULT_TIMEOUT_SECONDS: Final = 60.0
 _SCHEMA_NAME: Final = "claim_extraction"
 
 
@@ -51,6 +57,7 @@ class OpenAILLMClaimExtractor:
         model: str = _DEFAULT_MODEL,
         api_key: str | None = None,
         max_retries: int = _DEFAULT_MAX_RETRIES,
+        timeout: float = _DEFAULT_TIMEOUT_SECONDS,
         client: AsyncOpenAI | None = None,
     ) -> None:
         self.model = model
@@ -58,6 +65,7 @@ class OpenAILLMClaimExtractor:
         self._client = client or AsyncOpenAI(
             api_key=api_key or os.environ.get("OPENAI_API_KEY"),
             max_retries=max_retries,
+            timeout=timeout,
         )
 
     async def extract(self, text: str) -> Sequence[Claim]:

@@ -200,6 +200,19 @@ class LibraryStatusOutput(BaseModel):
     """Reranker selection string ('cross-encoder:BAAI/bge-reranker-base').
     None when no reranker is configured. Reranking is opt-in because it
     adds 200-1000ms per search/recall."""
+    sources: list[str] = []
+    """Names of configured search Sources, in the order they are tried
+    for cross-source merge. Lets a caller verify whether PubMed /
+    OpenAlex are wired without scraping result attribution."""
+    claim_extractor: str | None = None
+    """Active claim extractor name ('spacy', 'llm:openai:gpt-4o-mini').
+    None means extract_claims and assist_draft will refuse."""
+    paper_analyzer: str | None = None
+    """Active analyzer name ('openai:gpt-4o-mini', 'anthropic:...').
+    None means analyze_paper will refuse."""
+    citation_scorer: str | None = None
+    """Active citation scorer name ('heuristic'). Citation tools refuse
+    when None."""
     note: str | None = None
     """Human-readable hint shown when the library isn't fully configured."""
 
