@@ -69,7 +69,7 @@ from research_mcp.mcp.tools import (
 from research_mcp.reranker import HuggingFaceCrossEncoderReranker
 from research_mcp.service import DiscoveryService, LibraryService, SearchService
 from research_mcp.service.library import fetch_from_sources
-from research_mcp.sources import ArxivSource, SemanticScholarSource
+from research_mcp.sources import ArxivSource, PubMedSource, SemanticScholarSource
 
 _log = logging.getLogger(__name__)
 
@@ -532,7 +532,15 @@ async def run_default() -> None:
     """
     arxiv = ArxivSource()
     s2 = SemanticScholarSource()
-    sources: tuple[Source, ...] = (arxiv, s2)
+    # PubMed is enabled by default — research-mcp's primary medical-use case
+    # depends on it. `RESEARCH_MCP_DISABLE_PUBMED=1` opts out for users who
+    # want a leaner source list (e.g. CS-only workflows).
+    pubmed: PubMedSource | None = None
+    sources_list: list[Source] = [arxiv, s2]
+    if os.environ.get("RESEARCH_MCP_DISABLE_PUBMED") != "1":
+        pubmed = PubMedSource()
+        sources_list.append(pubmed)
+    sources: tuple[Source, ...] = tuple(sources_list)
     reranker, reranker_label = _select_reranker()
     search = SearchService(sources, reranker=reranker)
     discovery = DiscoveryService(search)
@@ -581,6 +589,8 @@ async def run_default() -> None:
     finally:
         await arxiv.aclose()
         await s2.aclose()
+        if pubmed is not None:
+            await pubmed.aclose()
         if index_to_close is not None:
             index_to_close.close()
 
