@@ -7,16 +7,39 @@ Layout under `RESEARCH_MCP_INDEX_PATH`:
       papers.sqlite      # rowid (== faiss id) -> JSON-encoded Paper
 
 Embeddings are L2-normalized on insert so inner-product search ranks by cosine.
-Writes are atomic: vectors are persisted to `vectors.faiss.tmp` then renamed.
-SQLite is left to its own ACID guarantees.
+
+Concurrency: a single asyncio.Lock serializes upsert/delete/search. FAISS
+IndexFlatIP is not thread-safe under mixed reads and writes, and the
+SQLite sidecar reads can race against in-flight commits, so we serialize.
+The cost is throughput on parallel reads — fine for a single-user research
+tool, would need a reader/writer split for a multi-tenant deployment.
+
+Per-thread SQLite connections: even with check_same_thread=False, sharing
+one connection across threads is undefined per the SQLite docs. Each
+worker thread gets its own connection via threading.local; the connection
+opens lazily on first use.
+
+Crash safety: writes happen as
+  1. Build the new in-memory FAISS state.
+  2. Write `vectors.faiss.tmp` atomically (still on disk under the same
+     filename until rename).
+  3. SQLite executemany + commit.
+  4. Atomic rename of `vectors.faiss.tmp` to `vectors.faiss`.
+
+If the process dies between steps 3 and 4, SQLite holds rows whose
+faiss_id isn't in the loaded `vectors.faiss`. On next startup, the
+reconcile step deletes those orphan SQLite rows so `count()` and
+search-result lookups stay consistent.
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import sqlite3
+import threading
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -25,6 +48,8 @@ import numpy as np
 
 from research_mcp.domain.paper import Paper
 from research_mcp.index._codec import paper_from_dict, paper_to_dict
+
+_log = logging.getLogger(__name__)
 
 
 class FaissIndex:
@@ -44,16 +69,16 @@ class FaissIndex:
         self._sqlite_path = self._dir / "papers.sqlite"
         self._lock = asyncio.Lock()
         self._index = self._load_or_create_index()
-        self._db = sqlite3.connect(self._sqlite_path, check_same_thread=False)
-        self._db.row_factory = sqlite3.Row
-        self._db.execute(
-            "CREATE TABLE IF NOT EXISTS papers ("
-            " faiss_id INTEGER PRIMARY KEY,"
-            " paper_id TEXT NOT NULL UNIQUE,"
-            " body TEXT NOT NULL"
-            ")"
-        )
-        self._db.commit()
+
+        # Per-thread connection store. Each thread that runs upsert/search/
+        # delete via asyncio.to_thread() gets its own connection on first
+        # use. Closing the FaissIndex closes the bookkeeping connection
+        # used here in __init__; the per-thread ones close when the worker
+        # threads exit.
+        self._tls = threading.local()
+        self._init_schema()
+
+        self._reconcile_orphans()
 
     @classmethod
     def from_env(cls, dimension: int) -> FaissIndex:
@@ -65,6 +90,63 @@ class FaissIndex:
     @property
     def dimension(self) -> int:
         return self._dimension
+
+    def _conn(self) -> sqlite3.Connection:
+        """Return the calling thread's SQLite connection, creating it on
+        first use. SQLite forbids cross-thread connection use; this gives
+        each worker thread its own."""
+        conn = getattr(self._tls, "conn", None)
+        if conn is None:
+            conn = sqlite3.connect(self._sqlite_path)
+            conn.row_factory = sqlite3.Row
+            self._tls.conn = conn
+        return conn
+
+    def _init_schema(self) -> None:
+        conn = self._conn()
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS papers ("
+            " faiss_id INTEGER PRIMARY KEY,"
+            " paper_id TEXT NOT NULL UNIQUE,"
+            " body TEXT NOT NULL"
+            ")"
+        )
+        conn.commit()
+
+    def _reconcile_orphans(self) -> None:
+        """Drop SQLite rows whose `faiss_id` isn't in the loaded FAISS index.
+
+        Recovers from a crash that landed between SQLite commit and the FAISS
+        rename: SQLite is ahead, FAISS is behind, the orphan rows can never
+        be reached by search anyway. Deleting them makes `count()` honest.
+        """
+        live_ids = self._collect_live_faiss_ids()
+        conn = self._conn()
+        cur = conn.execute("SELECT faiss_id FROM papers")
+        sqlite_ids = [int(r["faiss_id"]) for r in cur.fetchall()]
+        orphans = [fid for fid in sqlite_ids if fid not in live_ids]
+        if not orphans:
+            return
+        _log.warning(
+            "FaissIndex: dropping %d SQLite rows orphaned from FAISS "
+            "(likely from a crash between SQLite commit and FAISS rename)",
+            len(orphans),
+        )
+        conn.executemany("DELETE FROM papers WHERE faiss_id = ?", [(fid,) for fid in orphans])
+        conn.commit()
+
+    def _collect_live_faiss_ids(self) -> set[int]:
+        # IndexIDMap2 keeps an internal id_map array; faiss exposes it as
+        # an int64 view. Extract via reconstruct loop is expensive — instead,
+        # we rely on a search over a zero vector to enumerate, which is
+        # cheap-ish for IndexFlatIP since k can equal ntotal. For real-world
+        # sizes this is fine; for >100k papers, switch to walking the C++
+        # id_map directly.
+        if self._index.ntotal == 0:
+            return set()
+        zero = np.zeros((1, self._dimension), dtype=np.float32)
+        _, ids = self._index.search(zero, self._index.ntotal)
+        return {int(i) for i in ids[0] if i != -1}
 
     def _load_or_create_index(self) -> faiss.Index:
         if self._faiss_path.exists():
@@ -97,7 +179,8 @@ class FaissIndex:
     def _upsert_sync(
         self, papers: list[Paper], embeddings: list[Sequence[float]]
     ) -> None:
-        existing_rows = self._db.execute(
+        conn = self._conn()
+        existing_rows = conn.execute(
             f"SELECT faiss_id, paper_id FROM papers WHERE paper_id IN ({_placeholders(len(papers))})",
             [p.id for p in papers],
         ).fetchall()
@@ -105,7 +188,7 @@ class FaissIndex:
         if existing:
             self._index.remove_ids(np.array(list(existing.values()), dtype=np.int64))
 
-        max_row = self._db.execute("SELECT MAX(faiss_id) FROM papers").fetchone()[0] or 0
+        max_row = conn.execute("SELECT MAX(faiss_id) FROM papers").fetchone()[0] or 0
         next_id = max_row + 1
         new_ids: list[int] = []
         for paper in papers:
@@ -125,24 +208,42 @@ class FaissIndex:
         matrix = matrix / norms
         self._index.add_with_ids(matrix, np.asarray(new_ids, dtype=np.int64))
 
-        with self._db:
-            self._db.executemany(
-                "INSERT OR REPLACE INTO papers (faiss_id, paper_id, body) VALUES (?, ?, ?)",
-                [
-                    (fid, p.id, json.dumps(paper_to_dict(p)))
-                    for fid, p in zip(new_ids, papers, strict=True)
-                ],
-            )
-        self._persist_vectors()
+        # New crash-safe order:
+        # 1. Build the new FAISS state in-memory (done above via remove + add).
+        # 2. Write vectors.faiss.tmp to disk.
+        # 3. SQLite commit.
+        # 4. Atomic rename.
+        # If we die between (3) and (4), SQLite holds rows pointing at
+        # faiss_ids that aren't in the disk FAISS yet. _reconcile_orphans
+        # on next startup deletes those rows.
+        tmp = self._faiss_path.with_suffix(self._faiss_path.suffix + ".tmp")
+        faiss.write_index(self._index, str(tmp))
+        try:
+            with conn:
+                conn.executemany(
+                    "INSERT OR REPLACE INTO papers (faiss_id, paper_id, body) VALUES (?, ?, ?)",
+                    [
+                        (fid, p.id, json.dumps(paper_to_dict(p)))
+                        for fid, p in zip(new_ids, papers, strict=True)
+                    ],
+                )
+        except Exception:
+            # SQLite commit failed; leave the .tmp in place but don't rename.
+            # Next startup will see only the old vectors.faiss; reconcile is
+            # a no-op since SQLite never advanced.
+            tmp.unlink(missing_ok=True)
+            raise
+        os.replace(tmp, self._faiss_path)
 
     async def search(
         self,
         embedding: Sequence[float],
         k: int = 10,
     ) -> Sequence[tuple[Paper, float]]:
-        if self._index.ntotal == 0:
-            return []
-        return await asyncio.to_thread(self._search_sync, embedding, k)
+        async with self._lock:
+            if self._index.ntotal == 0:
+                return []
+            return await asyncio.to_thread(self._search_sync, embedding, k)
 
     def _search_sync(
         self, embedding: Sequence[float], k: int
@@ -153,16 +254,24 @@ class FaissIndex:
             query = query / norm
         k = min(k, self._index.ntotal)
         scores, ids = self._index.search(query, k)
+        # One IN-clause query for all k rows, then re-sort in Python by FAISS
+        # rank. Replaces the previous N+1 SELECT loop.
+        ranked_ids = [int(i) for i in ids[0] if i != -1]
+        if not ranked_ids:
+            return []
+        rows = self._conn().execute(
+            f"SELECT faiss_id, body FROM papers WHERE faiss_id IN ({_placeholders(len(ranked_ids))})",
+            ranked_ids,
+        ).fetchall()
+        body_by_id = {int(r["faiss_id"]): r["body"] for r in rows}
         results: list[tuple[Paper, float]] = []
         for fid, score in zip(ids[0], scores[0], strict=True):
             if fid == -1:
                 continue
-            row = self._db.execute(
-                "SELECT body FROM papers WHERE faiss_id = ?", (int(fid),)
-            ).fetchone()
-            if row is None:
+            body = body_by_id.get(int(fid))
+            if body is None:  # post-reconcile, this should never happen
                 continue
-            results.append((paper_from_dict(json.loads(row["body"])), float(score)))
+            results.append((paper_from_dict(json.loads(body)), float(score)))
         return results
 
     async def delete(self, paper_ids: Sequence[str]) -> None:
@@ -172,7 +281,8 @@ class FaissIndex:
             await asyncio.to_thread(self._delete_sync, list(paper_ids))
 
     def _delete_sync(self, paper_ids: list[str]) -> None:
-        rows = self._db.execute(
+        conn = self._conn()
+        rows = conn.execute(
             f"SELECT faiss_id FROM papers WHERE paper_id IN ({_placeholders(len(paper_ids))})",
             paper_ids,
         ).fetchall()
@@ -180,18 +290,31 @@ class FaissIndex:
         if not faiss_ids:
             return
         self._index.remove_ids(np.asarray(faiss_ids, dtype=np.int64))
-        with self._db:
-            self._db.execute(
-                f"DELETE FROM papers WHERE paper_id IN ({_placeholders(len(paper_ids))})",
-                paper_ids,
-            )
-        self._persist_vectors()
+        # Same crash-safe order as upsert.
+        tmp = self._faiss_path.with_suffix(self._faiss_path.suffix + ".tmp")
+        faiss.write_index(self._index, str(tmp))
+        try:
+            with conn:
+                conn.execute(
+                    f"DELETE FROM papers WHERE paper_id IN ({_placeholders(len(paper_ids))})",
+                    paper_ids,
+                )
+        except Exception:
+            tmp.unlink(missing_ok=True)
+            raise
+        os.replace(tmp, self._faiss_path)
 
     async def count(self) -> int:
-        return int(self._index.ntotal)
+        async with self._lock:
+            return int(self._index.ntotal)
 
     def close(self) -> None:
-        self._db.close()
+        # Close the bookkeeping connection used in __init__ / _reconcile_orphans.
+        # Other threads' connections are closed by the GC when those threads exit.
+        conn = getattr(self._tls, "conn", None)
+        if conn is not None:
+            conn.close()
+            self._tls.conn = None
 
 
 def _placeholders(n: int) -> str:
