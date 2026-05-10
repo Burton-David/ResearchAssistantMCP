@@ -49,10 +49,16 @@ from research_mcp.index import FaissIndex, MemoryIndex
 from research_mcp.mcp.tools import (
     AnalyzePaperInput,
     AnalyzePaperOutput,
+    AssistDraftInput,
+    AssistDraftOutput,
+    BulkIngestInput,
+    BulkIngestOutput,
     ChunkPaperInput,
     ChunkPaperOutput,
     CitationCandidateSummary,
     CitationQualityScoreSummary,
+    CitationRecommendationCandidateSummary,
+    CitationRecommendationSummary,
     CitePaperInput,
     CitePaperOutput,
     ClaimSummary,
@@ -87,6 +93,7 @@ from research_mcp.reranker import HuggingFaceCrossEncoderReranker
 from research_mcp.service import DiscoveryService, LibraryService, SearchService
 from research_mcp.service.analysis import AnalysisService
 from research_mcp.service.citation import CitationService
+from research_mcp.service.draft import DraftService
 from research_mcp.service.library import fetch_from_sources
 from research_mcp.sources import (
     ArxivSource,
@@ -294,6 +301,7 @@ def build_server(
     claim_extractor: ClaimExtractor | None = None,
     citation_service: CitationService | None = None,
     analysis_service: AnalysisService | None = None,
+    draft_service: DraftService | None = None,
 ) -> Server[Any, Any]:
     """Construct an MCP `Server` with the six research tools registered.
 
@@ -446,6 +454,31 @@ def build_server(
                     "selected via RESEARCH_MCP_ANALYSIS_MODEL."
                 ),
                 inputSchema=AnalyzePaperInput.model_json_schema(),
+            ),
+            mcp_types.Tool(
+                name="bulk_ingest",
+                description=(
+                    "Search across all configured sources and ingest the "
+                    "top-N results into the local library in one batched "
+                    "operation. Useful for quickly building a topic-focused "
+                    "corpus before semantic recall. Requires an embedder "
+                    "(see library_status)."
+                ),
+                inputSchema=BulkIngestInput.model_json_schema(),
+            ),
+            mcp_types.Tool(
+                name="assist_draft",
+                description=(
+                    "End-to-end citation assistant: paste a draft paragraph, "
+                    "get a list of recommended citations per claim. The "
+                    "pipeline extracts typed claims, finds candidate papers "
+                    "across all configured sources (arXiv, Semantic Scholar, "
+                    "PubMed, OpenAlex), scores each by venue + impact + "
+                    "recency, and returns ranked recommendations with "
+                    "human-readable explanations. The killer demo of this "
+                    "server."
+                ),
+                inputSchema=AssistDraftInput.model_json_schema(),
             ),
         ]
 
@@ -636,6 +669,73 @@ def build_server(
             paper=paper_to_summary(paper, source=source_from_id(paper.id, search.sources)),
         ).model_dump()
 
+    async def _do_bulk_ingest(arguments: dict[str, Any]) -> dict[str, Any]:
+        if library is None:
+            raise ValueError(f"bulk_ingest unavailable: {_NO_EMBEDDER_HINT}")
+        args = BulkIngestInput.model_validate(arguments)
+        outcome = await search.search(
+            SearchQuery(
+                text=args.query,
+                max_results=args.max_papers,
+                year_min=args.year_min,
+                year_max=args.year_max,
+            )
+        )
+        ingested = await library.bulk_ingest([r.paper for r in outcome.results])
+        return BulkIngestOutput(
+            ingested_count=len(ingested),
+            library_count=await library.count(),
+            papers=[
+                paper_to_summary(p, source=source_from_id(p.id, search.sources))
+                for p in ingested
+            ],
+            partial_failures=list(outcome.partial_failures),
+        ).model_dump()
+
+    async def _do_assist_draft(arguments: dict[str, Any]) -> dict[str, Any]:
+        if draft_service is None:
+            raise ValueError(
+                "assist_draft unavailable: needs a ClaimExtractor and a "
+                "CitationService. Install [claim-extraction] (spaCy + "
+                "en_core_web_sm); a citation_service is wired by default."
+            )
+        args = AssistDraftInput.model_validate(arguments)
+        recommendations = await draft_service.assist(
+            args.text, k_per_claim=args.k_per_claim
+        )
+        return AssistDraftOutput(
+            recommendations=[
+                CitationRecommendationSummary(
+                    claim=ClaimSummary(
+                        text=rec.claim.text,
+                        type=rec.claim.type.value,
+                        confidence=rec.claim.confidence,
+                        context=rec.claim.context,
+                        suggested_search_terms=list(
+                            rec.claim.suggested_search_terms
+                        ),
+                        start_char=rec.claim.start_char,
+                        end_char=rec.claim.end_char,
+                    ),
+                    candidates=[
+                        CitationRecommendationCandidateSummary(
+                            paper=paper_to_summary(
+                                c.paper,
+                                source="+".join(c.sources),
+                            ),
+                            score_total=c.score_total,
+                            score_warnings=list(c.score_warnings),
+                            explanation=c.explanation,
+                        )
+                        for c in rec.candidates
+                    ],
+                )
+                for rec in recommendations
+            ],
+            extractor=draft_service.extractor.name,
+            scorer=draft_service.citation.scorer.name,
+        ).model_dump()
+
     async def _do_analyze_paper(arguments: dict[str, Any]) -> dict[str, Any]:
         if analysis_service is None:
             raise ValueError(
@@ -728,6 +828,8 @@ def build_server(
         "score_citation": _do_score_citation,
         "explain_citation": _do_explain_citation,
         "analyze_paper": _do_analyze_paper,
+        "bulk_ingest": _do_bulk_ingest,
+        "assist_draft": _do_assist_draft,
     }
 
     # validate_input=False bypasses the mcp SDK's strict jsonschema check so
@@ -888,6 +990,13 @@ async def run_default() -> None:
         return await fetch_from_sources(sources, paper_id)
 
     paper_analyzer = _select_paper_analyzer()
+    claim_extractor = _select_claim_extractor()
+    citation_svc = CitationService(search=search, scorer=HeuristicCitationScorer())
+    draft_svc = (
+        DraftService(extractor=claim_extractor, citation=citation_svc)
+        if claim_extractor is not None
+        else None
+    )
     server = build_server(
         search=search,
         discovery=discovery,
@@ -896,15 +1005,14 @@ async def run_default() -> None:
         embedder_label=label,
         reranker_label=reranker_label,
         chunker=SectionAwareChunker(),
-        claim_extractor=_select_claim_extractor(),
-        citation_service=CitationService(
-            search=search, scorer=HeuristicCitationScorer()
-        ),
+        claim_extractor=claim_extractor,
+        citation_service=citation_svc,
         analysis_service=(
             AnalysisService(analyzer=paper_analyzer)
             if paper_analyzer is not None
             else None
         ),
+        draft_service=draft_svc,
     )
     try:
         async with stdio_server() as (read_stream, write_stream):
@@ -944,6 +1052,10 @@ async def run_in_memory() -> None:
     async def paper_lookup(paper_id: str) -> Paper | None:
         return await fetch_from_sources(sources, paper_id)
 
+    test_mode_extractor = _select_claim_extractor()
+    test_mode_citation = CitationService(
+        search=search, scorer=HeuristicCitationScorer()
+    )
     server = build_server(
         search=search,
         discovery=discovery,
@@ -951,14 +1063,17 @@ async def run_in_memory() -> None:
         library=library,
         embedder_label="fake:test-mode",
         chunker=SectionAwareChunker(),
-        claim_extractor=_select_claim_extractor(),
-        citation_service=CitationService(
-            search=search, scorer=HeuristicCitationScorer()
-        ),
+        claim_extractor=test_mode_extractor,
+        citation_service=test_mode_citation,
         # run_in_memory ignores RESEARCH_MCP_ANALYSIS_MODEL on purpose;
         # the e2e harness uses FakePaperAnalyzer to avoid burning API
         # credits on every test run.
         analysis_service=AnalysisService(analyzer=_fake_analyzer_for_test_mode()),
+        draft_service=(
+            DraftService(extractor=test_mode_extractor, citation=test_mode_citation)
+            if test_mode_extractor is not None
+            else None
+        ),
     )
     try:
         async with stdio_server() as (read_stream, write_stream):

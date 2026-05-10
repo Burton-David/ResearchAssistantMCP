@@ -122,6 +122,29 @@ class LibraryService:
         await self._index.upsert([paper], [vector])
         return paper
 
+    async def bulk_ingest(self, papers: Sequence[Paper]) -> Sequence[Paper]:
+        """Ingest multiple papers in one batched embedder call.
+
+        ingest_paper hits the embedder once per paper; for a 20-paper
+        bulk operation that's 20 round-trips. bulk_ingest packs all
+        embedding inputs into a single call (most embedders accept a
+        list and price by token, not request), then a single index
+        upsert. Empty input is a no-op.
+        """
+        unique: list[Paper] = []
+        seen: set[str] = set()
+        for p in papers:
+            if p.id in seen:
+                continue
+            seen.add(p.id)
+            unique.append(p)
+        if not unique:
+            return ()
+        texts = [_embedding_text(p) for p in unique]
+        vectors = await self._embedder.embed(texts)
+        await self._index.upsert(unique, vectors)
+        return tuple(unique)
+
     async def recall(self, query: str, k: int = 10) -> Sequence[tuple[Paper, float]]:
         """Top-k papers from the local index for `query`.
 

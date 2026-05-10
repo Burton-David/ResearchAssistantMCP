@@ -266,3 +266,58 @@ async def test_fetch_returns_none_when_every_source_says_not_mine() -> None:
         ingest_sources=[StaticSource("a", []), StaticSource("b", [])],
     )
     assert await library.fetch("arxiv:nope") is None
+
+
+async def test_bulk_ingest_batches_embedder_calls() -> None:
+    """Single batched embed call for multiple papers — verifies the hot
+    path scales to a 10-paper search-and-ingest without 10 round-trips."""
+
+    class _CountingEmbedder:
+        dimension: int = 8
+
+        def __init__(self) -> None:
+            self.batch_sizes: list[int] = []
+
+        async def embed(self, texts):  # type: ignore[no-untyped-def]
+            self.batch_sizes.append(len(texts))
+            return [tuple(float(i) for i in range(self.dimension))] * len(texts)
+
+    embedder = _CountingEmbedder()
+    index = MemoryIndex(embedder.dimension)
+    src = StaticSource("arxiv", [])
+    library = LibraryService(
+        index=index, embedder=embedder, ingest_sources=[src]  # type: ignore[arg-type]
+    )
+    papers = [
+        Paper(id=f"arxiv:{i}", title=f"t{i}", abstract="", authors=(Author("X"),))
+        for i in range(5)
+    ]
+    ingested = await library.bulk_ingest(papers)
+    assert len(ingested) == 5
+    # Exactly one call to the embedder, with all five inputs in it.
+    assert embedder.batch_sizes == [5]
+    assert await library.count() == 5
+
+
+async def test_bulk_ingest_deduplicates_by_paper_id() -> None:
+    embedder = FakeEmbedder(8)
+    index = MemoryIndex(embedder.dimension)
+    src = StaticSource("arxiv", [])
+    library = LibraryService(
+        index=index, embedder=embedder, ingest_sources=[src]
+    )
+    paper = Paper(id="arxiv:1", title="t", abstract="", authors=(Author("X"),))
+    ingested = await library.bulk_ingest([paper, paper, paper])
+    assert len(ingested) == 1
+    assert await library.count() == 1
+
+
+async def test_bulk_ingest_empty_input_is_noop() -> None:
+    embedder = FakeEmbedder(8)
+    index = MemoryIndex(embedder.dimension)
+    src = StaticSource("arxiv", [])
+    library = LibraryService(
+        index=index, embedder=embedder, ingest_sources=[src]
+    )
+    assert await library.bulk_ingest([]) == ()
+    assert await library.count() == 0

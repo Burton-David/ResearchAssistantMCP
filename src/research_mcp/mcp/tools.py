@@ -464,6 +464,73 @@ class AnalyzePaperOutput(BaseModel):
     analysis: PaperAnalysisSummary
 
 
+# ---- bulk_ingest ----
+
+
+class BulkIngestInput(_Strict):
+    query: NonBlankStr = Field(..., description="Search query.")
+    max_papers: int = Field(
+        20, ge=1, le=100,
+        description="Cap on how many papers to ingest from the search results.",
+    )
+    year_min: int | None = Field(None, description="Earliest publication year.")
+    year_max: int | None = Field(None, description="Latest publication year.")
+
+    @field_validator("query")
+    @classmethod
+    def _query_not_blank(cls, value: str) -> str:
+        return _reject_blank(value)
+
+
+class BulkIngestOutput(BaseModel):
+    ingested_count: int
+    library_count: int
+    papers: list[PaperSummary]
+    partial_failures: list[str] = []
+
+
+# ---- assist_draft ----
+
+
+class AssistDraftInput(_Strict):
+    text: NonBlankStr = Field(
+        ..., max_length=_MAX_DRAFT_CHARS,
+        description=(
+            "Draft text (paragraph or short section). The pipeline "
+            "extracts claims, finds candidate citations across all "
+            "configured sources, and returns ranked, explained "
+            "recommendations per claim."
+        ),
+    )
+    k_per_claim: int = Field(
+        3, ge=1, le=10,
+        description="How many candidate citations to return per claim.",
+    )
+
+    @field_validator("text")
+    @classmethod
+    def _text_not_blank(cls, value: str) -> str:
+        return _reject_blank(value)
+
+
+class CitationRecommendationCandidateSummary(BaseModel):
+    paper: PaperSummary
+    score_total: float
+    score_warnings: list[str]
+    explanation: str
+
+
+class CitationRecommendationSummary(BaseModel):
+    claim: ClaimSummary
+    candidates: list[CitationRecommendationCandidateSummary]
+
+
+class AssistDraftOutput(BaseModel):
+    recommendations: list[CitationRecommendationSummary]
+    extractor: str
+    scorer: str
+
+
 def paper_to_summary(paper: Paper, *, source: str = "") -> PaperSummary:
     """Project a `Paper` into the LLM-friendly summary view.
 
