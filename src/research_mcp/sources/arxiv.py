@@ -22,6 +22,7 @@ import httpx
 from research_mcp.domain.paper import Author, Paper
 from research_mcp.domain.query import SearchQuery
 from research_mcp.errors import SourceUnavailable
+from research_mcp.sources._backoff import with_backoff
 from research_mcp.sources._cache import DiskCache
 from research_mcp.sources._rate_limit import RateLimiter
 
@@ -95,8 +96,12 @@ class ArxivSource:
         if cached is not None:
             return cached
         await self._rate.acquire()
+
+        async def do_request() -> httpx.Response:
+            return await self._client.get(_API_URL, params=params)
+
         try:
-            response = await self._client.get(_API_URL, params=params)
+            response = await with_backoff(do_request, source_name=self.name)
             response.raise_for_status()
         except httpx.HTTPError as exc:
             _log.warning("arxiv request failed for %s: %s", params, exc)

@@ -22,6 +22,7 @@ import httpx
 from research_mcp.domain.paper import Author, Paper
 from research_mcp.domain.query import SearchQuery
 from research_mcp.errors import SourceUnavailable
+from research_mcp.sources._backoff import with_backoff
 from research_mcp.sources._cache import DiskCache
 from research_mcp.sources._rate_limit import RateLimiter
 
@@ -117,8 +118,14 @@ class SemanticScholarSource:
             return cached
         await self._rate.acquire()
         headers = {"x-api-key": self._api_key} if self._api_key else {}
+
+        async def do_request() -> httpx.Response:
+            return await self._client.get(
+                _API_BASE + path, params=params, headers=headers
+            )
+
         try:
-            response = await self._client.get(_API_BASE + path, params=params, headers=headers)
+            response = await with_backoff(do_request, source_name=self.name)
             response.raise_for_status()
         except httpx.HTTPError as exc:
             _log.warning("semantic scholar request failed for %s: %s", path, exc)
