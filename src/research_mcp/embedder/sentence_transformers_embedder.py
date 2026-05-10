@@ -70,8 +70,20 @@ class SentenceTransformersEmbedder:
         if model in _KNOWN_DIMENSIONS:
             self.dimension = _KNOWN_DIMENSIONS[model]
         else:
-            # Unknown model — load eagerly so we can ask it for its dim.
-            loaded = self._load_model()
+            # Unknown model: load eagerly so we can ask for its dimension.
+            # This will hit the network on first construction. Wrap the
+            # failure so a typo turns into a clean error naming the env var
+            # rather than the raw HF stack trace the diagnostic flagged.
+            try:
+                loaded = self._load_model()
+            except Exception as exc:
+                raise RuntimeError(
+                    f"could not load sentence-transformers model "
+                    f"{model!r}. Verify the model name (set via "
+                    f"RESEARCH_MCP_EMBEDDER=sentence-transformers:<model>) "
+                    f"matches a real Hugging Face Hub repo. Underlying "
+                    f"error: {type(exc).__name__}: {exc}"
+                ) from exc
             self.dimension = int(loaded.get_sentence_embedding_dimension())
 
     def _load_model(self) -> Any:

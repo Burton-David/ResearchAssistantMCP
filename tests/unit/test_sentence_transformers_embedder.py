@@ -27,6 +27,32 @@ def test_known_model_dimension_resolves_without_loading() -> None:
     assert e._model is None  # confirms lazy load
 
 
+def test_unknown_model_raises_clean_error_with_env_hint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A typo or genuinely unknown model name must surface a clean message
+    naming RESEARCH_MCP_EMBEDDER instead of a raw HF stack trace. Unknown
+    models load eagerly (they have to — the wiring layer needs `dimension`
+    to construct the FAISS index at boot), but the failure mode is now
+    legible.
+
+    We mock the `_load_model` failure rather than trying to actually contact
+    Hugging Face Hub. Doing the network round-trip from a unit test is both
+    slow and unreliable on macOS — the cumulative state from prior numpy /
+    faiss / anyio imports interacts badly with sentence-transformers'
+    initialization path and can SIGABRT the test process. This mock keeps
+    the test honest (verifying the wrapping logic) without that risk.
+    """
+    import research_mcp.embedder.sentence_transformers_embedder as st_mod
+
+    def _broken_load(self) -> None:  # type: ignore[no-untyped-def]
+        raise OSError("simulated HF Hub 404 for typo'd model name")
+
+    monkeypatch.setattr(st_mod.SentenceTransformersEmbedder, "_load_model", _broken_load)
+    with pytest.raises(RuntimeError, match=r"RESEARCH_MCP_EMBEDDER"):
+        SentenceTransformersEmbedder("definitely-not-a-real/model-name")
+
+
 def test_protocol_conformance() -> None:
     e = SentenceTransformersEmbedder("BAAI/bge-base-en-v1.5")
     assert isinstance(e, Embedder)
