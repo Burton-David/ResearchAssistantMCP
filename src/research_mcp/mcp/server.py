@@ -40,6 +40,7 @@ from research_mcp.mcp.tools import (
     SearchPapersInput,
     SearchPapersOutput,
     paper_to_summary,
+    source_from_id,
 )
 from research_mcp.service import LibraryService, SearchService
 from research_mcp.sources import ArxivSource, SemanticScholarSource
@@ -116,7 +117,7 @@ def build_server(
 
     async def _do_search(arguments: dict[str, Any]) -> dict[str, Any]:
         args = SearchPapersInput.model_validate(arguments)
-        papers = await search.search(
+        results = await search.search(
             SearchQuery(
                 text=args.query,
                 max_results=args.max_results,
@@ -125,14 +126,17 @@ def build_server(
             )
         )
         return SearchPapersOutput(
-            results=[paper_to_summary(p) for p in papers]
+            results=[
+                paper_to_summary(r.paper, source="+".join(r.sources))
+                for r in results
+            ]
         ).model_dump()
 
     async def _do_ingest(arguments: dict[str, Any]) -> dict[str, Any]:
         args = IngestPaperInput.model_validate(arguments)
         paper = await library.ingest(args.paper_id)
         return IngestPaperOutput(
-            paper=paper_to_summary(paper),
+            paper=paper_to_summary(paper, source=source_from_id(paper.id)),
             library_count=await library.count(),
         ).model_dump()
 
@@ -141,7 +145,10 @@ def build_server(
         results = await library.recall(args.query, k=args.k)
         return LibrarySearchOutput(
             results=[
-                LibrarySearchHit(paper=paper_to_summary(p), score=score)
+                LibrarySearchHit(
+                    paper=paper_to_summary(p, source=source_from_id(p.id)),
+                    score=score,
+                )
                 for p, score in results
             ]
         ).model_dump()
@@ -186,7 +193,9 @@ def build_server(
                 "Use a prefixed id like 'arxiv:1706.03762', 'doi:10.1038/...', "
                 "or 's2:abc123'."
             )
-        return GetPaperOutput(paper=paper_to_summary(paper)).model_dump()
+        return GetPaperOutput(
+            paper=paper_to_summary(paper, source=source_from_id(paper.id))
+        ).model_dump()
 
     handlers: dict[str, Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]] = {
         "search_papers": _do_search,

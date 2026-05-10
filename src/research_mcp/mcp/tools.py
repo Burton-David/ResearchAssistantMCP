@@ -126,6 +126,9 @@ class PaperSummary(BaseModel):
     url: str | None
     pdf_url: str | None
     doi: str | None
+    source: str = ""
+    """Adapters that contributed metadata, joined with '+' if multiple
+    (e.g. 'arxiv', 'semantic_scholar', 'arxiv+semantic_scholar')."""
 
 
 class SearchPapersOutput(BaseModel):
@@ -166,7 +169,14 @@ class GetPaperOutput(BaseModel):
     paper: PaperSummary
 
 
-def paper_to_summary(paper: Paper) -> PaperSummary:
+def paper_to_summary(paper: Paper, *, source: str = "") -> PaperSummary:
+    """Project a `Paper` into the LLM-friendly summary view.
+
+    `source` names the adapter(s) that produced the metadata. For records
+    coming out of `SearchService`, pass the joined `SearchResult.sources`
+    string. For ingest / cite / get_paper outputs, derive it from the
+    canonical id prefix via `source_from_id`.
+    """
     all_authors = [a.name for a in paper.authors]
     truncated = len(all_authors) > _MAX_AUTHORS_IN_SUMMARY
     return PaperSummary(
@@ -181,7 +191,27 @@ def paper_to_summary(paper: Paper) -> PaperSummary:
         url=paper.url,
         pdf_url=paper.pdf_url,
         doi=paper.doi,
+        source=source,
     )
+
+
+_PREFIX_TO_SOURCE_NAME = {
+    "arxiv": "arxiv",
+    "doi": "semantic_scholar",
+    "s2": "semantic_scholar",
+}
+
+
+def source_from_id(paper_id: str) -> str:
+    """Map a canonical id prefix to the adapter name that produced it.
+
+    Used when a Paper isn't carrying provenance through SearchService —
+    e.g., responses from `ingest_paper`, `cite_paper`, `get_paper` that
+    came out of `LibraryService.fetch`. Cite/get_paper currently route
+    `doi:` ids through Semantic Scholar.
+    """
+    prefix = paper_id.split(":", 1)[0]
+    return _PREFIX_TO_SOURCE_NAME.get(prefix, prefix)
 
 
 def to_citation_format(value: str) -> CitationFormat:

@@ -67,7 +67,8 @@ def build_namespace(*, use_openai: bool = False) -> dict[str, Any]:
     search = SearchService([arxiv, s2])
 
     async def q(text: str, max_results: int = 10) -> list[Paper]:
-        return await search.search(SearchQuery(text=text, max_results=max_results))
+        results = await search.search(SearchQuery(text=text, max_results=max_results))
+        return [r.paper for r in results]
 
     def cite(paper: Paper, fmt: str = "ama") -> str:
         return RENDERERS[CitationFormat(fmt)].render(paper)

@@ -90,8 +90,10 @@ async def _search(query: str, max_results: int, source: str) -> None:
         if not results:
             click.echo("No results.", err=True)
             return
-        for paper in results:
-            click.echo(f"{paper.id}\t{paper.title}")
+        for hit in results:
+            paper = hit.paper
+            source_label = "+".join(hit.sources)
+            click.echo(f"{paper.id}\t[{source_label}]\t{paper.title}")
             snippet = paper.abstract[:200].replace("\n", " ")
             if snippet:
                 click.echo(f"    {snippet}{'...' if len(paper.abstract) > 200 else ''}")
