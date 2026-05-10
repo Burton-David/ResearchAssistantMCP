@@ -41,6 +41,9 @@ from research_mcp.index import FaissIndex, MemoryIndex
 from research_mcp.mcp.tools import (
     CitePaperInput,
     CitePaperOutput,
+    FindPaperHit,
+    FindPaperInput,
+    FindPaperOutput,
     GetPaperInput,
     GetPaperOutput,
     IngestPaperInput,
@@ -55,7 +58,7 @@ from research_mcp.mcp.tools import (
     paper_to_summary,
     source_from_id,
 )
-from research_mcp.service import LibraryService, SearchService
+from research_mcp.service import DiscoveryService, LibraryService, SearchService
 from research_mcp.service.library import fetch_from_sources
 from research_mcp.sources import ArxivSource, SemanticScholarSource
 
@@ -103,6 +106,7 @@ def _select_embedder() -> tuple[Embedder | None, str | None]:
 def build_server(
     *,
     search: SearchService,
+    discovery: DiscoveryService,
     paper_lookup: Callable[[str], Awaitable[Paper | None]],
     library: LibraryService | None,
     embedder_label: str | None,
@@ -175,6 +179,17 @@ def build_server(
                     "commit to embedding the paper into the local library."
                 ),
                 inputSchema=GetPaperInput.model_json_schema(),
+            ),
+            mcp_types.Tool(
+                name="find_paper",
+                description=(
+                    "Find a paper by title (and optional author names) when "
+                    "you don't have a canonical id. Returns at most three "
+                    "candidates ranked by title-token similarity with a "
+                    "confidence score. Use this to bridge from a citation "
+                    "you've read about to an id you can ingest or cite."
+                ),
+                inputSchema=FindPaperInput.model_json_schema(),
             ),
         ]
 
@@ -255,6 +270,21 @@ def build_server(
             note=None,
         ).model_dump()
 
+    async def _do_find_paper(arguments: dict[str, Any]) -> dict[str, Any]:
+        args = FindPaperInput.model_validate(arguments)
+        hits = await discovery.find_paper(
+            title=args.title, authors=tuple(args.authors)
+        )
+        return FindPaperOutput(
+            results=[
+                FindPaperHit(
+                    paper=paper_to_summary(h.paper, source="+".join(h.sources)),
+                    confidence=h.confidence,
+                )
+                for h in hits
+            ]
+        ).model_dump()
+
     async def _do_get_paper(arguments: dict[str, Any]) -> dict[str, Any]:
         args = GetPaperInput.model_validate(arguments)
         try:
@@ -281,6 +311,7 @@ def build_server(
         "cite_paper": _do_cite,
         "library_status": _do_status,
         "get_paper": _do_get_paper,
+        "find_paper": _do_find_paper,
     }
 
     # validate_input=False bypasses the mcp SDK's strict jsonschema check so
@@ -310,6 +341,7 @@ async def run_default() -> None:
     s2 = SemanticScholarSource()
     sources: tuple[Source, ...] = (arxiv, s2)
     search = SearchService(sources)
+    discovery = DiscoveryService(search)
 
     embedder, label = _select_embedder()
     library: LibraryService | None = None
@@ -335,6 +367,7 @@ async def run_default() -> None:
 
     server = build_server(
         search=search,
+        discovery=discovery,
         paper_lookup=paper_lookup,
         library=library,
         embedder_label=label,
@@ -365,12 +398,14 @@ async def run_in_memory() -> None:
     index = MemoryIndex(embedder.dimension)
     library = LibraryService(index=index, embedder=embedder, ingest_sources=sources)
     search = SearchService(sources)
+    discovery = DiscoveryService(search)
 
     async def paper_lookup(paper_id: str) -> Paper | None:
         return await fetch_from_sources(sources, paper_id)
 
     server = build_server(
         search=search,
+        discovery=discovery,
         paper_lookup=paper_lookup,
         library=library,
         embedder_label="fake:test-mode",

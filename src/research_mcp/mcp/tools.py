@@ -107,6 +107,24 @@ class GetPaperInput(_Strict):
     )
 
 
+class FindPaperInput(_Strict):
+    title: NonBlankStr = Field(
+        ..., description="Paper title (or close approximation)."
+    )
+    authors: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Optional author names; surnames are extracted automatically and "
+            "used to break ties between same-titled papers by different authors."
+        ),
+    )
+
+    @field_validator("title")
+    @classmethod
+    def _title_not_blank(cls, value: str) -> str:
+        return _reject_blank(value)
+
+
 # Past this many authors, large-collaboration HEP/ML papers (BESIII, ATLAS,
 # CMS, …) blow tens of KB of context for one search result. We truncate
 # explicitly with a `+ N more` count so the LLM still knows the full
@@ -173,6 +191,20 @@ class LibraryStatusOutput(BaseModel):
 
 class GetPaperOutput(BaseModel):
     paper: PaperSummary
+
+
+class FindPaperHit(BaseModel):
+    paper: PaperSummary
+    confidence: float
+    """Title-token Jaccard similarity plus a small author-match bonus when
+    the caller passed authors. Range [0, 1.15]. Above ~0.7 indicates a
+    confident match; below ~0.3 means the discovered paper is probably
+    not what was asked for; >1.0 implies a perfect title match with
+    author corroboration."""
+
+
+class FindPaperOutput(BaseModel):
+    results: list[FindPaperHit]
 
 
 def paper_to_summary(paper: Paper, *, source: str = "") -> PaperSummary:
