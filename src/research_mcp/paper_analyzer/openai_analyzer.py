@@ -35,6 +35,7 @@ from research_mcp.paper_analyzer._schema import (
 _log = logging.getLogger(__name__)
 
 _DEFAULT_MODEL: Final = "gpt-4o-mini"
+_DEFAULT_MAX_RETRIES: Final = 4
 # response_format requires a name on the schema; OpenAI rejects names with
 # spaces or other invalid identifiers.
 _SCHEMA_NAME: Final = "paper_analysis"
@@ -48,12 +49,17 @@ class OpenAILLMPaperAnalyzer:
         *,
         model: str = _DEFAULT_MODEL,
         api_key: str | None = None,
+        max_retries: int = _DEFAULT_MAX_RETRIES,
         client: AsyncOpenAI | None = None,
     ) -> None:
         self.model = model
         self.name = f"openai:{model}"
+        # SDK default is 2 retries; we bump to 4 for the user's hot path
+        # (analyze_paper / assist_draft are interactive). The SDK does
+        # exponential backoff and honors Retry-After.
         self._client = client or AsyncOpenAI(
-            api_key=api_key or os.environ.get("OPENAI_API_KEY")
+            api_key=api_key or os.environ.get("OPENAI_API_KEY"),
+            max_retries=max_retries,
         )
 
     async def analyze(

@@ -320,3 +320,66 @@ def test_extract_claims_input_accepts_normal_paragraph() -> None:
         {"text": "Our model outperforms BERT by 12% on three benchmarks."}
     )
     assert "outperforms" in parsed.text
+
+
+def test_select_claim_extractor_default_is_spacy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No env → spaCy extractor (Round 1, ships ~80% precision)."""
+    from research_mcp.claim_extractor import SpacyClaimExtractor
+    from research_mcp.mcp.server import _select_claim_extractor
+
+    monkeypatch.delenv("RESEARCH_MCP_CLAIM_EXTRACTOR", raising=False)
+    extractor = _select_claim_extractor()
+    assert isinstance(extractor, SpacyClaimExtractor)
+
+
+def test_select_claim_extractor_explicit_spacy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from research_mcp.claim_extractor import SpacyClaimExtractor
+    from research_mcp.mcp.server import _select_claim_extractor
+
+    monkeypatch.setenv("RESEARCH_MCP_CLAIM_EXTRACTOR", "spacy")
+    assert isinstance(_select_claim_extractor(), SpacyClaimExtractor)
+
+
+def test_select_claim_extractor_llm_openai(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`llm:openai:<model>` → OpenAILLMClaimExtractor with the right model."""
+    from research_mcp.claim_extractor import OpenAILLMClaimExtractor
+    from research_mcp.mcp.server import _select_claim_extractor
+
+    monkeypatch.setenv("RESEARCH_MCP_CLAIM_EXTRACTOR", "llm:openai:gpt-4o-mini")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    extractor = _select_claim_extractor()
+    assert isinstance(extractor, OpenAILLMClaimExtractor)
+    assert extractor.model == "gpt-4o-mini"
+    assert extractor.name == "llm:openai:gpt-4o-mini"
+
+
+def test_select_claim_extractor_llm_anthropic(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from research_mcp.claim_extractor import AnthropicLLMClaimExtractor
+    from research_mcp.mcp.server import _select_claim_extractor
+
+    monkeypatch.setenv(
+        "RESEARCH_MCP_CLAIM_EXTRACTOR", "llm:anthropic:claude-haiku-4-5-20251001"
+    )
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+    extractor = _select_claim_extractor()
+    assert isinstance(extractor, AnthropicLLMClaimExtractor)
+    assert extractor.model == "claude-haiku-4-5-20251001"
+
+
+def test_select_claim_extractor_garbled_returns_none(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unparseable env value should return None — no silent fallback to
+    spaCy, since the user explicitly asked for something else."""
+    from research_mcp.mcp.server import _select_claim_extractor
+
+    monkeypatch.setenv("RESEARCH_MCP_CLAIM_EXTRACTOR", "frobnicate")
+    assert _select_claim_extractor() is None

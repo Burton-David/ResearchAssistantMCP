@@ -39,6 +39,7 @@ from research_mcp.paper_analyzer._schema import (
 _log = logging.getLogger(__name__)
 
 _DEFAULT_MODEL: Final = "claude-haiku-4-5-20251001"
+_DEFAULT_MAX_RETRIES: Final = 4
 _DEFAULT_MAX_TOKENS: Final = 4096
 
 
@@ -50,14 +51,19 @@ class AnthropicLLMPaperAnalyzer:
         *,
         model: str = _DEFAULT_MODEL,
         api_key: str | None = None,
+        max_retries: int = _DEFAULT_MAX_RETRIES,
         max_tokens: int = _DEFAULT_MAX_TOKENS,
         client: AsyncAnthropic | None = None,
     ) -> None:
         self.model = model
         self.name = f"anthropic:{model}"
         self._max_tokens = max_tokens
+        # SDK default is 2 retries; bump to 4 since analyze_paper is on
+        # the user's interactive path. Anthropic's exponential backoff
+        # handles 429/5xx + Retry-After honoring out of the box.
         self._client = client or AsyncAnthropic(
-            api_key=api_key or os.environ.get("ANTHROPIC_API_KEY")
+            api_key=api_key or os.environ.get("ANTHROPIC_API_KEY"),
+            max_retries=max_retries,
         )
 
     async def analyze(

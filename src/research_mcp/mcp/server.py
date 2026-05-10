@@ -270,23 +270,69 @@ def _select_paper_analyzer() -> PaperAnalyzer | None:
 
 
 def _select_claim_extractor() -> ClaimExtractor | None:
-    """Try to construct the spaCy-backed claim extractor; return None on
-    missing dependency rather than crashing the server.
+    """Resolve the claim-extractor selection from the environment.
 
-    Boot-time failure here would lock out the eight existing tools just
-    because the optional [claim-extraction] extra wasn't installed.
-    Instead we degrade gracefully: extract_claims refuses with a clear
-    install hint, and everything else keeps working.
+    `RESEARCH_MCP_CLAIM_EXTRACTOR` formats:
+      * unset / "spacy"       → SpacyClaimExtractor (Round 1; ships ~80% precision)
+      * "llm:openai:<model>"  → OpenAILLMClaimExtractor (Round 2; ~95% precision)
+      * "llm:anthropic:<model>" → AnthropicLLMClaimExtractor (Round 2)
+
+    Construction failures degrade to None — extract_claims and
+    assist_draft refuse with a clear hint, the eight other tools stay
+    available. We do not silently fall back to spaCy when the user
+    asked for an LLM extractor: the precision difference is the whole
+    point of the env var, so a failure should be visible.
     """
+    spec = os.environ.get("RESEARCH_MCP_CLAIM_EXTRACTOR", "").strip().lower()
+    if not spec or spec == "spacy":
+        return _build_spacy_extractor()
+    if spec.startswith("llm:"):
+        return _build_llm_extractor(spec[len("llm:"):])
+    _log.warning(
+        "RESEARCH_MCP_CLAIM_EXTRACTOR=%r not understood; "
+        "use 'spacy' or 'llm:openai:<model>' or 'llm:anthropic:<model>'.",
+        spec,
+    )
+    return None
+
+
+def _build_spacy_extractor() -> ClaimExtractor | None:
     try:
         from research_mcp.claim_extractor import SpacyClaimExtractor
-    except ImportError:  # pragma: no cover — defensive; real failure is below
+    except ImportError:  # pragma: no cover — defensive
         return None
     try:
         return SpacyClaimExtractor()
     except RuntimeError as exc:
-        _log.warning("claim_extractor unavailable: %s", exc)
+        _log.warning("spacy claim extractor unavailable: %s", exc)
         return None
+
+
+def _build_llm_extractor(spec: str) -> ClaimExtractor | None:
+    """Parse 'openai:<model>' or 'anthropic:<model>' into the right adapter."""
+    provider, _, model = spec.partition(":")
+    provider = provider.strip().lower()
+    model = model.strip()
+    try:
+        if provider == "openai":
+            from research_mcp.claim_extractor import OpenAILLMClaimExtractor
+
+            return OpenAILLMClaimExtractor(model=model or "gpt-4o-mini")
+        if provider == "anthropic":
+            from research_mcp.claim_extractor import AnthropicLLMClaimExtractor
+
+            return AnthropicLLMClaimExtractor(
+                model=model or "claude-haiku-4-5-20251001"
+            )
+    except Exception as exc:  # pragma: no cover — env-specific
+        _log.warning("LLM claim extractor construction failed: %s", exc)
+        return None
+    _log.warning(
+        "RESEARCH_MCP_CLAIM_EXTRACTOR=llm:%r not understood; "
+        "supported providers: openai, anthropic.",
+        spec,
+    )
+    return None
 
 
 def build_server(
