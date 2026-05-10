@@ -196,6 +196,10 @@ class LibraryStatusOutput(BaseModel):
     """Embedder selection string ('openai:...', 'sentence-transformers:...').
     None when no embedder is configured — in which case `count` is 0 and
     ingest/recall tools will refuse with a helpful message."""
+    reranker: str | None = None
+    """Reranker selection string ('cross-encoder:BAAI/bge-reranker-base').
+    None when no reranker is configured. Reranking is opt-in because it
+    adds 200-1000ms per search/recall."""
     note: str | None = None
     """Human-readable hint shown when the library isn't fully configured."""
 

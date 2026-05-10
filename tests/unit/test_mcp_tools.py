@@ -198,6 +198,36 @@ def test_format_validation_error_strips_pydantic_url() -> None:
         assert "https://" not in message
 
 
+def test_library_status_output_carries_reranker_field() -> None:
+    """Lock down the public shape: library_status surfaces both embedder
+    and reranker labels so an LLM client can confirm config without
+    grepping logs."""
+    from research_mcp.mcp.tools import LibraryStatusOutput
+
+    out = LibraryStatusOutput(
+        count=10,
+        embedder="openai:text-embedding-3-small",
+        reranker="cross-encoder:BAAI/bge-reranker-base",
+    )
+    payload = out.model_dump()
+    assert payload["embedder"] == "openai:text-embedding-3-small"
+    assert payload["reranker"] == "cross-encoder:BAAI/bge-reranker-base"
+
+
+def test_select_reranker_handles_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The selector parses RESEARCH_MCP_RERANKER and returns (None, None)
+    when unset. We don't actually instantiate a real cross-encoder here —
+    that requires a network round-trip; just verify the parser branches."""
+    from research_mcp.mcp.server import _select_reranker
+
+    monkeypatch.delenv("RESEARCH_MCP_RERANKER", raising=False)
+    assert _select_reranker() == (None, None)
+
+    monkeypatch.setenv("RESEARCH_MCP_RERANKER", "magic:foo")
+    with pytest.raises(RuntimeError, match=r"RESEARCH_MCP_RERANKER"):
+        _select_reranker()
+
+
 def test_semantic_scholar_fetch_returns_none_for_arxiv_prefix() -> None:
     """Honor id_prefixes: S2 declares ('s2', 'doi'); fetch must return None
     for an arxiv-prefixed id rather than burning an API call. This was the

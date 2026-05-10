@@ -32,6 +32,7 @@ from research_mcp.domain.citation import CitationFormat
 from research_mcp.domain.embedder import Embedder
 from research_mcp.domain.paper import Paper
 from research_mcp.domain.query import SearchQuery
+from research_mcp.domain.reranker import Reranker
 from research_mcp.domain.source import Source
 from research_mcp.embedder import (
     FakeEmbedder,
@@ -60,6 +61,7 @@ from research_mcp.mcp.tools import (
     paper_to_summary,
     source_from_id,
 )
+from research_mcp.reranker import HuggingFaceCrossEncoderReranker
 from research_mcp.service import DiscoveryService, LibraryService, SearchService
 from research_mcp.service.library import fetch_from_sources
 from research_mcp.sources import ArxivSource, SemanticScholarSource
@@ -105,6 +107,33 @@ def _select_embedder() -> tuple[Embedder | None, str | None]:
     return None, None
 
 
+def _select_reranker() -> tuple[Reranker | None, str | None]:
+    """Resolve the reranker selection from `RESEARCH_MCP_RERANKER`.
+
+    Returns (reranker, label) where label is the wire-level selection
+    string for library_status. (None, None) when unset — reranking is
+    off by default because it adds 200-1000ms per search/recall and
+    the user should opt in deliberately.
+    """
+    spec = os.environ.get("RESEARCH_MCP_RERANKER", "").strip()
+    if not spec:
+        return None, None
+    kind, _, model = spec.partition(":")
+    kind = kind.strip().lower()
+    model = model.strip()
+    if kind in {"cross-encoder", "hf-cross-encoder"}:
+        return (
+            HuggingFaceCrossEncoderReranker(
+                model or "BAAI/bge-reranker-base"
+            ),
+            spec,
+        )
+    raise RuntimeError(
+        f"RESEARCH_MCP_RERANKER={spec!r} not understood. "
+        "Use 'cross-encoder:<model>'."
+    )
+
+
 def build_server(
     *,
     search: SearchService,
@@ -112,6 +141,7 @@ def build_server(
     paper_lookup: Callable[[str], Awaitable[Paper | None]],
     library: LibraryService | None,
     embedder_label: str | None,
+    reranker_label: str | None = None,
 ) -> Server[Any, Any]:
     """Construct an MCP `Server` with the six research tools registered.
 
@@ -267,11 +297,13 @@ def build_server(
             return LibraryStatusOutput(
                 count=0,
                 embedder=None,
+                reranker=reranker_label,
                 note=_NO_EMBEDDER_HINT,
             ).model_dump()
         return LibraryStatusOutput(
             count=await library.count(),
             embedder=embedder_label,
+            reranker=reranker_label,
             note=None,
         ).model_dump()
 
@@ -444,7 +476,8 @@ async def run_default() -> None:
     arxiv = ArxivSource()
     s2 = SemanticScholarSource()
     sources: tuple[Source, ...] = (arxiv, s2)
-    search = SearchService(sources)
+    reranker, reranker_label = _select_reranker()
+    search = SearchService(sources, reranker=reranker)
     discovery = DiscoveryService(search)
 
     embedder, label = _select_embedder()
@@ -461,7 +494,10 @@ async def run_default() -> None:
         index = FaissIndex(index_path, dimension=embedder.dimension)
         index_to_close = index
         library = LibraryService(
-            index=index, embedder=embedder, ingest_sources=sources
+            index=index,
+            embedder=embedder,
+            ingest_sources=sources,
+            reranker=reranker,
         )
     else:
         _log.warning("no embedder configured: %s", _NO_EMBEDDER_HINT)
@@ -475,6 +511,7 @@ async def run_default() -> None:
         paper_lookup=paper_lookup,
         library=library,
         embedder_label=label,
+        reranker_label=reranker_label,
     )
     try:
         async with stdio_server() as (read_stream, write_stream):
@@ -503,6 +540,9 @@ async def run_in_memory() -> None:
     library = LibraryService(index=index, embedder=embedder, ingest_sources=sources)
     search = SearchService(sources)
     discovery = DiscoveryService(search)
+    # run_in_memory ignores RESEARCH_MCP_RERANKER on purpose — the e2e
+    # test mode exists precisely to avoid pulling 250 MB of cross-encoder
+    # weights every test run.
 
     async def paper_lookup(paper_id: str) -> Paper | None:
         return await fetch_from_sources(sources, paper_id)

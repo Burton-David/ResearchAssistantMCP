@@ -81,6 +81,8 @@ def search(query: str, max_results: int, source: str) -> None:
 
 
 async def _search(query: str, max_results: int, source: str) -> None:
+    from research_mcp.mcp.server import _select_reranker
+
     sources: list[Source] = []
     arxiv: ArxivSource | None = None
     s2: SemanticScholarSource | None = None
@@ -90,8 +92,9 @@ async def _search(query: str, max_results: int, source: str) -> None:
     if source in {"s2", "all"}:
         s2 = SemanticScholarSource()
         sources.append(s2)
+    reranker, _ = _select_reranker()
     try:
-        svc = SearchService(sources)
+        svc = SearchService(sources, reranker=reranker)
         outcome = await svc.search(SearchQuery(text=query, max_results=max_results))
         if not outcome.results:
             if outcome.partial_failures:
@@ -195,13 +198,14 @@ async def _cite(paper_id: str, fmt: str) -> None:
 
 
 def _build_library_for_cli() -> _CliLibrary:
-    """Wire a LibraryService for CLI use, sharing embedder selection with the
-    MCP server entry point. No embedder configured → click error.
+    """Wire a LibraryService for CLI use, sharing embedder + reranker
+    selection with the MCP server entry point. No embedder configured →
+    click error.
 
     Requires `RESEARCH_MCP_INDEX_PATH` so ingest/recall persist across CLI
     invocations.
     """
-    from research_mcp.mcp.server import _select_embedder
+    from research_mcp.mcp.server import _select_embedder, _select_reranker
 
     embedder, _label = _select_embedder()
     if embedder is None:
@@ -211,10 +215,14 @@ def _build_library_for_cli() -> _CliLibrary:
             "RESEARCH_MCP_INDEX_PATH is required for ingest/recall — set it to "
             "a writable directory; FAISS files will live there."
         )
+    reranker, _ = _select_reranker()
     arxiv = ArxivSource()
     s2 = SemanticScholarSource()
     faiss = FaissIndex.from_env(embedder.dimension)
     library = LibraryService(
-        index=faiss, embedder=embedder, ingest_sources=[arxiv, s2]
+        index=faiss,
+        embedder=embedder,
+        ingest_sources=[arxiv, s2],
+        reranker=reranker,
     )
     return _CliLibrary(arxiv=arxiv, s2=s2, library=library, index_close=faiss.close)
