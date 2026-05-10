@@ -42,6 +42,11 @@ export RESEARCH_MCP_EMBEDDER="sentence-transformers:BAAI/bge-base-en-v1.5"
 export RESEARCH_MCP_INDEX_PATH=~/research_index
 export SEMANTIC_SCHOLAR_API_KEY=...        # optional, raises S2 rate limit
 
+# Optional: enable a cross-encoder reranker for better non-CS-domain
+# search quality (chemistry, biology, etc. — arXiv's keyword ranker
+# struggles there). Adds 200-1000ms per search/recall; off by default.
+export RESEARCH_MCP_RERANKER="cross-encoder:BAAI/bge-reranker-base"
+
 research-mcp serve                         # stdio MCP server
 research-mcp repl                          # IPython with abstractions wired
 ```
@@ -72,13 +77,14 @@ Restart Claude Desktop (⌘Q, not just close the window). Seven tools appear: `s
 
 ## Architecture
 
-The codebase is built around four orthogonal protocols in `src/research_mcp/domain/`:
+The codebase is built around five orthogonal protocols in `src/research_mcp/domain/`:
 
 ```
 Source            where papers come from         (arxiv, semantic_scholar, ...)
 Index             where ingested papers live     (faiss, in-memory, pluggable)
 Embedder          how text becomes vectors       (openai, sentence-transformers)
 CitationRenderer  how a paper becomes a string   (ama, apa, bibtex, mla, chicago)
+Reranker          how candidates get rescored    (hf-cross-encoder, optional)
 ```
 
 Implementations live in sibling packages. The MCP server composes them but knows nothing about specific implementations. Swapping FAISS for Chroma is a one-line change in the wiring module.

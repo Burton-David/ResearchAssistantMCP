@@ -1,10 +1,10 @@
 # Architecture
 
-`research-mcp` is built around four orthogonal protocols. All behavior is composed from these — there is no inheritance hierarchy, no plugin registry, no framework code beyond the protocols themselves.
+`research-mcp` is built around five orthogonal protocols. All behavior is composed from these — there is no inheritance hierarchy, no plugin registry, no framework code beyond the protocols themselves.
 
-## The four protocols
+## The five protocols
 
-All four live in `src/research_mcp/domain/`. They are `typing.Protocol` declarations, not abstract base classes — see [ADR-0001](adr/0001-protocol-based-abstractions.md) for why.
+All five live in `src/research_mcp/domain/`. They are `typing.Protocol` declarations, not abstract base classes — see [ADR-0001](adr/0001-protocol-based-abstractions.md) for why.
 
 ### Source
 
@@ -44,14 +44,23 @@ def render(paper) -> str: ...
 
 Turns a `Paper` into a formatted citation string. One renderer per supported format.
 
+### Reranker
+
+```python
+async def score(query: str, papers: Sequence[Paper]) -> Sequence[float]: ...
+```
+
+Optional. Rescores `(query, paper)` pairs for relevance, sitting one layer above bi-encoder retrieval. The motivating use case is non-CS-domain queries where keyword-driven upstream rankers (arXiv) put share-a-word papers atop the list. Implementations: `HuggingFaceCrossEncoderReranker` (wraps `sentence-transformers` CrossEncoder; default `BAAI/bge-reranker-base`); `FakeReranker` for tests. Selected via `RESEARCH_MCP_RERANKER=cross-encoder:<model>`; off by default because cross-encoder inference adds 200-1000ms per call.
+
 ## Composition
 
 Two services compose the protocols:
 
-- **`SearchService`** — wraps a list of `Source`s. Dispatches a query to all of them in parallel, merges results, dedups by canonical id.
-- **`LibraryService`** — wraps `Index` + `Embedder` + a `Source`. Methods: `ingest(paper_id)`, `recall(query, k)`, `delete(paper_id)`, `count()`.
+- **`SearchService`** — wraps a list of `Source`s + an optional `Reranker`. Dispatches a query to all sources in parallel, merges results, dedups by canonical id, optionally reranks the merged pool, then truncates to the user's `max_results`.
+- **`LibraryService`** — wraps `Index` + `Embedder` + ingest `Source`s + an optional `Reranker`. Methods: `ingest(paper_id)`, `recall(query, k)`, `delete(paper_id)`, `count()`. With a reranker, `recall` pulls a wider candidate set from the index, rescores, and returns top-k by reranker score.
+- **`DiscoveryService`** — wraps `SearchService`. `find_paper(title, authors)` for title-and-author lookup with Jaccard re-ranking.
 
-The MCP server in `src/research_mcp/mcp/` defines tool schemas (`search_papers`, `ingest_paper`, `library_search`, `cite_paper`) and wires services to tool handlers. The server depends on the services; the services depend on the protocols. Concrete adapters (`arxiv`, `faiss_index`, `openai_embedder`, `ama_renderer`) are injected at the wiring layer in `cli.py`.
+The MCP server in `src/research_mcp/mcp/` defines tool schemas (`search_papers`, `find_paper`, `ingest_paper`, `library_search`, `cite_paper`, `get_paper`, `library_status`) and wires services to tool handlers. The server depends on the services; the services depend on the protocols. Concrete adapters (`arxiv`, `faiss_index`, `openai_embedder`, `ama_renderer`, `hf_cross_encoder`) are injected at the wiring layer in `cli.py` and `mcp/server.py`.
 
 ## Why async
 
