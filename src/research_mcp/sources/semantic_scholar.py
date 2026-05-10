@@ -31,7 +31,7 @@ _log = logging.getLogger(__name__)
 _API_BASE: Final = "https://api.semanticscholar.org/graph/v1"
 _FIELDS: Final = (
     "paperId,title,abstract,authors,year,publicationDate,externalIds,"
-    "openAccessPdf,venue,journal,url"
+    "openAccessPdf,venue,journal,url,citationCount"
 )
 _DEFAULT_CACHE_TTL_SECONDS: Final = 24 * 60 * 60
 _DEFAULT_TIMEOUT: Final = 30.0
@@ -170,6 +170,8 @@ def _parse_paper(raw: dict[str, Any]) -> Paper | None:
         if isinstance(a, dict) and a.get("name")
     )
     published = _parse_date(raw.get("publicationDate"), raw.get("year"))
+    raw_count = raw.get("citationCount")
+    citation_count = raw_count if isinstance(raw_count, int) else None
     return Paper(
         id=f"s2:{s2_id}",
         title=raw.get("title") or "",
@@ -182,6 +184,7 @@ def _parse_paper(raw: dict[str, Any]) -> Paper | None:
         arxiv_id=arxiv_id,
         semantic_scholar_id=s2_id,
         pdf_url=pdf_url,
+        citation_count=citation_count,
     )
 
 

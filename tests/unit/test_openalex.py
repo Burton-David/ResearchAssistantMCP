@@ -228,6 +228,23 @@ def test_parse_work_handles_no_abstract() -> None:
     assert p.abstract == ""
 
 
+def test_parse_work_carries_citation_count_through() -> None:
+    """citation_count drives downstream impact scoring; the parser must
+    surface OpenAlex's cited_by_count, not drop it."""
+    p = _parse_work(_VASWANI_WORK)
+    assert p is not None
+    assert p.citation_count == 6536
+
+
+def test_parse_work_handles_missing_citation_count() -> None:
+    """Some records lack cited_by_count (or report it as null)."""
+    work = dict(_VASWANI_WORK)
+    work["cited_by_count"] = None
+    p = _parse_work(work)
+    assert p is not None
+    assert p.citation_count is None
+
+
 # ---- end-to-end search/fetch via MockTransport ----
 
 

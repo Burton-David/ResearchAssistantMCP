@@ -184,6 +184,8 @@ def _parse_work(raw: dict[str, Any] | None) -> Paper | None:
     pdf_url = _extract_pdf_url(raw)
     authors = _extract_authors(raw)
 
+    raw_count = raw.get("cited_by_count")
+    citation_count = raw_count if isinstance(raw_count, int) else None
     return Paper(
         id=f"openalex:{openalex_id}",
         title=title,
@@ -194,6 +196,7 @@ def _parse_work(raw: dict[str, Any] | None) -> Paper | None:
         venue=venue,
         doi=doi,
         pdf_url=pdf_url,
+        citation_count=citation_count,
     )
 
 

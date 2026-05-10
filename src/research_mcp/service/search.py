@@ -289,6 +289,10 @@ def _merge_records(a: Paper, b: Paper) -> Paper:
         semantic_scholar_id=_pick_first_non_none(a.semantic_scholar_id, b.semantic_scholar_id),
         pdf_url=_pick_first_non_none(a.pdf_url, b.pdf_url),
         full_text=_pick_first_non_none(a.full_text, b.full_text),
+        # Pick the higher count when both sources report one — different
+        # adapters' count snapshots aren't synchronized, so 'higher' is
+        # the closest proxy for 'fresher' available without a timestamp.
+        citation_count=_pick_higher_int(a.citation_count, b.citation_count),
         metadata=_merge_metadata(a.metadata, b.metadata),
     )
 
@@ -350,6 +354,14 @@ def _pick_url(a: Paper, b: Paper) -> str | None:
 
 def _pick_first_non_none(a: str | None, b: str | None) -> str | None:
     return a if a is not None else b
+
+
+def _pick_higher_int(a: int | None, b: int | None) -> int | None:
+    if a is None:
+        return b
+    if b is None:
+        return a
+    return max(a, b)
 
 
 def _merge_metadata(

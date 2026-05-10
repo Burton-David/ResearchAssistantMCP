@@ -45,4 +45,9 @@ class Paper:
     semantic_scholar_id: str | None = None
     pdf_url: str | None = None
     full_text: str | None = None
+    citation_count: int | None = None
+    """How many other works have cited this paper, per the source that
+    populated it. None means 'unknown' — distinct from 0 ('cited zero
+    times'); the scorer treats those differently. S2 and OpenAlex
+    populate this; arXiv doesn't and PubMed doesn't directly."""
     metadata: Mapping[str, str] = field(default_factory=lambda: MappingProxyType({}))

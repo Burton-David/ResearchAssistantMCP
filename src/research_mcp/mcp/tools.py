@@ -310,6 +310,108 @@ class ExtractClaimsOutput(BaseModel):
     so the LLM caller knows the precision tier of these claims."""
 
 
+# ---- find_citations / score_citation / explain_citation ----
+
+
+class _ClaimDescriptor(_Strict):
+    """Inline claim description for citation tools that take a claim
+    directly. Mirrors the `Claim` domain object's surface, minus the
+    char offsets which only matter when the claim was extracted from
+    text the caller is showing back to the user."""
+
+    text: NonBlankStr = Field(..., description="The verbatim claim text.")
+    type: ClaimTypeLiteral = Field(
+        "factual",
+        description=(
+            "Claim type: drives downstream search-term emphasis "
+            "and explanation phrasing."
+        ),
+    )
+    context: str = Field(
+        "",
+        max_length=_MAX_DRAFT_CHARS,
+        description="Surrounding sentence/paragraph for disambiguation.",
+    )
+    suggested_search_terms: list[str] = Field(
+        default_factory=list,
+        max_length=20,
+        description="Keywords the citation finder uses as the upstream query.",
+    )
+
+    @field_validator("text")
+    @classmethod
+    def _text_not_blank(cls, value: str) -> str:
+        return _reject_blank(value)
+
+
+class FindCitationsInput(_Strict):
+    claim: _ClaimDescriptor = Field(
+        ...,
+        description=(
+            "Claim to find citations for. Pass the output of "
+            "extract_claims's claims[i] verbatim, or hand-craft a claim "
+            "object when working from a single sentence."
+        ),
+    )
+    k: int = Field(
+        5, ge=1, le=20,
+        description="How many candidate citations to return.",
+    )
+
+
+class ScoreCitationInput(_Strict):
+    paper_id: str = Field(
+        ...,
+        min_length=1,
+        description="Canonical paper id (e.g. 'arxiv:1706.03762').",
+    )
+
+
+class ExplainCitationInput(_Strict):
+    paper_id: str = Field(
+        ...,
+        min_length=1,
+        description="Canonical paper id (e.g. 'arxiv:1706.03762').",
+    )
+    claim: _ClaimDescriptor = Field(
+        ..., description="The claim this paper would be cited for."
+    )
+
+
+class CitationQualityScoreSummary(BaseModel):
+    total: float
+    """0-100 headline score; bands are <45 weak, 45-65 moderate, >=65 strong."""
+
+    venue: float
+    impact: float
+    author: float
+    recency: float
+    factors: dict[str, str]
+    warnings: list[str]
+
+
+class CitationCandidateSummary(BaseModel):
+    paper: PaperSummary
+    score: CitationQualityScoreSummary
+
+
+class FindCitationsOutput(BaseModel):
+    candidates: list[CitationCandidateSummary]
+    scorer: str
+    """Active scorer name ('heuristic' / 'fake' / future LLM scorer)."""
+
+
+class ScoreCitationOutput(BaseModel):
+    paper: PaperSummary
+    score: CitationQualityScoreSummary
+
+
+class ExplainCitationOutput(BaseModel):
+    explanation: str
+    score: CitationQualityScoreSummary
+    paper: PaperSummary
+
+
 def paper_to_summary(paper: Paper, *, source: str = "") -> PaperSummary:
     """Project a `Paper` into the LLM-friendly summary view.
 

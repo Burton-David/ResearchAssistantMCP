@@ -29,6 +29,7 @@ from pydantic import ValidationError
 from research_mcp import __version__
 from research_mcp.chunker import SectionAwareChunker
 from research_mcp.citation import RENDERERS
+from research_mcp.citation_scorer import HeuristicCitationScorer
 from research_mcp.domain.chunker import Chunker
 from research_mcp.domain.citation import CitationFormat
 from research_mcp.domain.claim import ClaimExtractor
@@ -47,11 +48,17 @@ from research_mcp.index import FaissIndex, MemoryIndex
 from research_mcp.mcp.tools import (
     ChunkPaperInput,
     ChunkPaperOutput,
+    CitationCandidateSummary,
+    CitationQualityScoreSummary,
     CitePaperInput,
     CitePaperOutput,
     ClaimSummary,
+    ExplainCitationInput,
+    ExplainCitationOutput,
     ExtractClaimsInput,
     ExtractClaimsOutput,
+    FindCitationsInput,
+    FindCitationsOutput,
     FindPaperHit,
     FindPaperInput,
     FindPaperOutput,
@@ -64,6 +71,8 @@ from research_mcp.mcp.tools import (
     LibrarySearchOutput,
     LibraryStatusInput,
     LibraryStatusOutput,
+    ScoreCitationInput,
+    ScoreCitationOutput,
     SearchPapersInput,
     SearchPapersOutput,
     TextChunkSummary,
@@ -72,6 +81,7 @@ from research_mcp.mcp.tools import (
 )
 from research_mcp.reranker import HuggingFaceCrossEncoderReranker
 from research_mcp.service import DiscoveryService, LibraryService, SearchService
+from research_mcp.service.citation import CitationService
 from research_mcp.service.library import fetch_from_sources
 from research_mcp.sources import (
     ArxivSource,
@@ -82,6 +92,11 @@ from research_mcp.sources import (
 
 _log = logging.getLogger(__name__)
 
+_CITATION_UNAVAILABLE_HINT = (
+    "citation tools unavailable: no citation service configured. The "
+    "server constructs one automatically when a CitationScorer is "
+    "available; check server logs for boot warnings."
+)
 _NO_EMBEDDER_HINT = (
     "no embedder is configured. Set RESEARCH_MCP_EMBEDDER to "
     "'openai:text-embedding-3-small' (requires OPENAI_API_KEY) or "
@@ -148,6 +163,56 @@ def _select_reranker() -> tuple[Reranker | None, str | None]:
     )
 
 
+def _claim_from_descriptor(desc: Any) -> Any:
+    """Convert a `_ClaimDescriptor` into a domain `Claim`.
+
+    The MCP tool accepts a flat dict; the service wants the domain
+    type. Doing the conversion in one place keeps the handlers tight.
+    """
+    from research_mcp.domain.claim import Claim, ClaimType
+
+    return Claim(
+        text=desc.text,
+        type=ClaimType(desc.type),
+        confidence=0.85,  # synthetic; user-supplied claims aren't extractor-scored
+        context=desc.context,
+        suggested_search_terms=tuple(desc.suggested_search_terms),
+    )
+
+
+def _score_to_summary(score: Any) -> CitationQualityScoreSummary:
+    return CitationQualityScoreSummary(
+        total=score.total,
+        venue=score.venue,
+        impact=score.impact,
+        author=score.author,
+        recency=score.recency,
+        factors=dict(score.factors),
+        warnings=list(score.warnings),
+    )
+
+
+
+
+async def _resolve_paper(paper_id: str, lookup: Callable[[str], Awaitable[Paper | None]]) -> Paper:
+    """Fetch a paper or raise a clean ValueError; shared by score/explain handlers."""
+    try:
+        paper = await lookup(paper_id)
+    except SourceUnavailable as exc:
+        raise ValueError(
+            f"could not resolve {paper_id!r}: "
+            f"{exc.source_name} is unavailable ({exc.short_reason()}). "
+            "This is usually transient — try again."
+        ) from exc
+    if paper is None:
+        raise ValueError(
+            f"no configured source recognizes paper id {paper_id!r}. "
+            "Use a prefixed id like 'arxiv:1706.03762', 'doi:10.1038/...', "
+            "'s2:abc123', 'pmid:12345', or 'openalex:W123'."
+        )
+    return paper
+
+
 def _select_claim_extractor() -> ClaimExtractor | None:
     """Try to construct the spaCy-backed claim extractor; return None on
     missing dependency rather than crashing the server.
@@ -178,6 +243,7 @@ def build_server(
     reranker_label: str | None = None,
     chunker: Chunker | None = None,
     claim_extractor: ClaimExtractor | None = None,
+    citation_service: CitationService | None = None,
 ) -> Server[Any, Any]:
     """Construct an MCP `Server` with the six research tools registered.
 
@@ -284,6 +350,39 @@ def build_server(
                     "papers worth citing."
                 ),
                 inputSchema=ExtractClaimsInput.model_json_schema(),
+            ),
+            mcp_types.Tool(
+                name="find_citations",
+                description=(
+                    "Given a Claim (typically from extract_claims), search "
+                    "all configured sources, score each candidate by venue + "
+                    "impact + recency, and return the top-k recommended "
+                    "citations. Each candidate carries its full quality "
+                    "breakdown, not just a total — so the user can see WHY "
+                    "a paper ranked where it did."
+                ),
+                inputSchema=FindCitationsInput.model_json_schema(),
+            ),
+            mcp_types.Tool(
+                name="score_citation",
+                description=(
+                    "Compute a citation-quality score for a paper the caller "
+                    "already has. Returns the 0-100 total plus per-dimension "
+                    "breakdown (venue / impact / author / recency) and any "
+                    "warnings (predatory venue, retracted, very recent)."
+                ),
+                inputSchema=ScoreCitationInput.model_json_schema(),
+            ),
+            mcp_types.Tool(
+                name="explain_citation",
+                description=(
+                    "Produce a human-readable recommendation for citing a "
+                    "specific paper as evidence for a specific claim. "
+                    "Returns a strong/moderate/weak verdict plus the "
+                    "venue + impact + recency reasoning the user can show "
+                    "to a co-author or reviewer."
+                ),
+                inputSchema=ExplainCitationInput.model_json_schema(),
             ),
         ]
 
@@ -432,6 +531,48 @@ def build_server(
             extractor=claim_extractor.name,
         ).model_dump()
 
+    async def _do_find_citations(arguments: dict[str, Any]) -> dict[str, Any]:
+        if citation_service is None:
+            raise ValueError(_CITATION_UNAVAILABLE_HINT)
+        args = FindCitationsInput.model_validate(arguments)
+        claim = _claim_from_descriptor(args.claim)
+        candidates = await citation_service.find_citations(claim, k=args.k)
+        return FindCitationsOutput(
+            candidates=[
+                CitationCandidateSummary(
+                    paper=paper_to_summary(c.paper, source="+".join(c.sources)),
+                    score=_score_to_summary(c.score),
+                )
+                for c in candidates
+            ],
+            scorer=citation_service.scorer.name,
+        ).model_dump()
+
+    async def _do_score_citation(arguments: dict[str, Any]) -> dict[str, Any]:
+        if citation_service is None:
+            raise ValueError(_CITATION_UNAVAILABLE_HINT)
+        args = ScoreCitationInput.model_validate(arguments)
+        paper = await _resolve_paper(args.paper_id, paper_lookup)
+        score = await citation_service.score_citation(paper)
+        return ScoreCitationOutput(
+            paper=paper_to_summary(paper, source=source_from_id(paper.id, search.sources)),
+            score=_score_to_summary(score),
+        ).model_dump()
+
+    async def _do_explain_citation(arguments: dict[str, Any]) -> dict[str, Any]:
+        if citation_service is None:
+            raise ValueError(_CITATION_UNAVAILABLE_HINT)
+        args = ExplainCitationInput.model_validate(arguments)
+        paper = await _resolve_paper(args.paper_id, paper_lookup)
+        claim = _claim_from_descriptor(args.claim)
+        explanation = await citation_service.explain_citation(paper, claim)
+        score = await citation_service.score_citation(paper, claim)
+        return ExplainCitationOutput(
+            explanation=explanation,
+            score=_score_to_summary(score),
+            paper=paper_to_summary(paper, source=source_from_id(paper.id, search.sources)),
+        ).model_dump()
+
     async def _do_find_paper(arguments: dict[str, Any]) -> dict[str, Any]:
         args = FindPaperInput.model_validate(arguments)
         outcome = await discovery.find_paper(
@@ -489,6 +630,9 @@ def build_server(
         "find_paper": _do_find_paper,
         "chunk_paper": _do_chunk_paper,
         "extract_claims": _do_extract_claims,
+        "find_citations": _do_find_citations,
+        "score_citation": _do_score_citation,
+        "explain_citation": _do_explain_citation,
     }
 
     # validate_input=False bypasses the mcp SDK's strict jsonschema check so
@@ -657,6 +801,9 @@ async def run_default() -> None:
         reranker_label=reranker_label,
         chunker=SectionAwareChunker(),
         claim_extractor=_select_claim_extractor(),
+        citation_service=CitationService(
+            search=search, scorer=HeuristicCitationScorer()
+        ),
     )
     try:
         async with stdio_server() as (read_stream, write_stream):
@@ -704,6 +851,9 @@ async def run_in_memory() -> None:
         embedder_label="fake:test-mode",
         chunker=SectionAwareChunker(),
         claim_extractor=_select_claim_extractor(),
+        citation_service=CitationService(
+            search=search, scorer=HeuristicCitationScorer()
+        ),
     )
     try:
         async with stdio_server() as (read_stream, write_stream):
