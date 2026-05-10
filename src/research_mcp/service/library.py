@@ -14,10 +14,17 @@ from research_mcp.domain.embedder import Embedder
 from research_mcp.domain.index import Index
 from research_mcp.domain.paper import Paper
 from research_mcp.domain.source import Source
+from research_mcp.errors import SourceUnavailable
 
 
 class PaperNotFoundError(LookupError):
-    """Raised when an ingest is attempted for an id no source can resolve."""
+    """Raised when an ingest is attempted for an id no source can resolve.
+
+    Distinct from `SourceUnavailable`: this means every Source we asked
+    confirmed it does not own the id. Use this only when we have a
+    definitive miss — if a Source was unavailable and we never got a
+    confirmed answer, propagate `SourceUnavailable` instead.
+    """
 
 
 class LibraryService:
@@ -45,14 +52,27 @@ class LibraryService:
     async def fetch(self, paper_id: str) -> Paper | None:
         """Resolve a paper id against the configured Sources in order.
 
-        Returns the first Source's hit. Returns None if no Source recognized
-        the id — per the Source protocol contract, an implementation must
-        return None (not raise) for ids it does not own.
+        Three outcomes:
+          - A Source returned a Paper: that Paper.
+          - Every Source returned None (id not owned by any of them): None.
+          - At least one Source raised `SourceUnavailable` and no Source
+            returned a Paper: re-raises the first `SourceUnavailable`. We
+            don't have a definitive answer because at least one upstream
+            never responded; the caller decides whether to retry or give
+            up.
         """
+        first_unavailable: SourceUnavailable | None = None
         for source in self._sources:
-            paper = await source.fetch(paper_id)
+            try:
+                paper = await source.fetch(paper_id)
+            except SourceUnavailable as exc:
+                if first_unavailable is None:
+                    first_unavailable = exc
+                continue
             if paper is not None:
                 return paper
+        if first_unavailable is not None:
+            raise first_unavailable
         return None
 
     async def ingest(self, paper_id: str) -> Paper:

@@ -6,9 +6,10 @@ import pytest
 
 from research_mcp.domain.paper import Author, Paper
 from research_mcp.embedder import FakeEmbedder
+from research_mcp.errors import SourceUnavailable
 from research_mcp.index import MemoryIndex
 from research_mcp.service.library import LibraryService, PaperNotFoundError
-from tests.conftest import StaticSource
+from tests.conftest import StaticSource, UnavailableSource
 
 pytestmark = pytest.mark.unit
 
@@ -112,3 +113,51 @@ def test_construction_requires_at_least_one_ingest_source() -> None:
     index = MemoryIndex(embedder.dimension)
     with pytest.raises(ValueError):
         LibraryService(index=index, embedder=embedder, ingest_sources=[])
+
+
+async def test_fetch_propagates_source_unavailable_when_no_definite_answer() -> None:
+    """If every Source either returned None or was unavailable, and at least
+    one was unavailable, we propagate the unavailability — we don't have a
+    definitive miss to report."""
+    embedder = FakeEmbedder(16)
+    index = MemoryIndex(embedder.dimension)
+    library = LibraryService(
+        index=index,
+        embedder=embedder,
+        ingest_sources=[
+            StaticSource("arxiv", []),  # confirms id not mine
+            UnavailableSource("semantic_scholar", "429 rate limited"),
+        ],
+    )
+    with pytest.raises(SourceUnavailable) as exc:
+        await library.fetch("arxiv:nope")
+    assert exc.value.source_name == "semantic_scholar"
+    assert "rate limited" in exc.value.reason
+
+
+async def test_fetch_returns_paper_even_when_other_source_unavailable() -> None:
+    """If one Source resolves the id, an unavailable peer is irrelevant."""
+    embedder = FakeEmbedder(16)
+    index = MemoryIndex(embedder.dimension)
+    paper = Paper(
+        id="arxiv:1", title="t", abstract="", authors=(Author("Smith"),), arxiv_id="1"
+    )
+    library = LibraryService(
+        index=index,
+        embedder=embedder,
+        ingest_sources=[UnavailableSource("flaky"), StaticSource("arxiv", [paper])],
+    )
+    found = await library.fetch(paper.id)
+    assert found is not None
+    assert found.id == paper.id
+
+
+async def test_fetch_returns_none_when_every_source_says_not_mine() -> None:
+    embedder = FakeEmbedder(16)
+    index = MemoryIndex(embedder.dimension)
+    library = LibraryService(
+        index=index,
+        embedder=embedder,
+        ingest_sources=[StaticSource("a", []), StaticSource("b", [])],
+    )
+    assert await library.fetch("arxiv:nope") is None

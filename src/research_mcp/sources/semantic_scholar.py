@@ -21,6 +21,7 @@ import httpx
 
 from research_mcp.domain.paper import Author, Paper
 from research_mcp.domain.query import SearchQuery
+from research_mcp.errors import SourceUnavailable
 from research_mcp.sources._cache import DiskCache
 from research_mcp.sources._rate_limit import RateLimiter
 
@@ -78,8 +79,9 @@ class SemanticScholarSource:
             lo = str(query.year_min) if query.year_min is not None else ""
             hi = str(query.year_max) if query.year_max is not None else ""
             params["year"] = f"{lo}-{hi}"
-        body = await self._fetch("/paper/search", params)
-        if body is None:
+        try:
+            body = await self._fetch("/paper/search", params)
+        except SourceUnavailable:
             return []
         try:
             payload = json.loads(body)
@@ -94,15 +96,14 @@ class SemanticScholarSource:
         if s2_id is None:
             return None
         body = await self._fetch(f"/paper/{s2_id}", {"fields": _FIELDS})
-        if body is None:
-            return None
         try:
             return _parse_paper(json.loads(body))
-        except json.JSONDecodeError:
+        except json.JSONDecodeError as exc:
             _log.exception("semantic scholar fetch response not JSON")
-            return None
+            # A garbled body from S2 isn't an "id unknown"; treat as transient.
+            raise SourceUnavailable(self.name, "response was not JSON") from exc
 
-    async def _fetch(self, path: str, params: dict[str, str]) -> bytes | None:
+    async def _fetch(self, path: str, params: dict[str, str]) -> bytes:
         cache_key = path + "?" + "&".join(f"{k}={v}" for k, v in sorted(params.items()))
         cached = self._cache.get(cache_key)
         if cached is not None:
@@ -112,9 +113,9 @@ class SemanticScholarSource:
         try:
             response = await self._client.get(_API_BASE + path, params=params, headers=headers)
             response.raise_for_status()
-        except httpx.HTTPError:
-            _log.exception("semantic scholar request failed for %s", path)
-            return None
+        except httpx.HTTPError as exc:
+            _log.warning("semantic scholar request failed for %s: %s", path, exc)
+            raise SourceUnavailable(self.name, str(exc)) from exc
         body = response.content
         self._cache.set(cache_key, body)
         return body

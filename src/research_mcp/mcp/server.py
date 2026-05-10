@@ -23,6 +23,7 @@ from research_mcp.domain.citation import CitationFormat
 from research_mcp.domain.paper import Paper
 from research_mcp.domain.query import SearchQuery
 from research_mcp.embedder import FakeEmbedder, OpenAIEmbedder
+from research_mcp.errors import SourceUnavailable
 from research_mcp.index import FaissIndex, MemoryIndex
 from research_mcp.mcp.tools import (
     CitePaperInput,
@@ -136,9 +137,19 @@ def build_server(
 
     async def _do_cite(arguments: dict[str, Any]) -> dict[str, Any]:
         args = CitePaperInput.model_validate(arguments)
-        paper = await paper_lookup(args.paper_id)
+        try:
+            paper = await paper_lookup(args.paper_id)
+        except SourceUnavailable as exc:
+            raise ValueError(
+                f"could not resolve {args.paper_id!r}: source {exc.source_name!r} "
+                f"is unavailable ({exc.reason}). This is usually transient — try again."
+            ) from exc
         if paper is None:
-            raise ValueError(f"paper not found for id {args.paper_id!r}")
+            raise ValueError(
+                f"no configured source recognizes paper id {args.paper_id!r}. "
+                "Use a prefixed id like 'arxiv:1706.03762', 'doi:10.1038/...', "
+                "or 's2:abc123'."
+            )
         renderer = RENDERERS[CitationFormat(args.format)]
         return CitePaperOutput(
             citation=renderer.render(paper),

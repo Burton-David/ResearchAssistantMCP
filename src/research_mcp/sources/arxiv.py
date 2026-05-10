@@ -21,6 +21,7 @@ import httpx
 
 from research_mcp.domain.paper import Author, Paper
 from research_mcp.domain.query import SearchQuery
+from research_mcp.errors import SourceUnavailable
 from research_mcp.sources._cache import DiskCache
 from research_mcp.sources._rate_limit import RateLimiter
 
@@ -72,8 +73,13 @@ class ArxivSource:
             "sortBy": "relevance",
             "sortOrder": "descending",
         }
-        body = await self._fetch(params)
-        if body is None:
+        try:
+            body = await self._fetch(params)
+        except SourceUnavailable:
+            # Source contract requires `search` to degrade to an empty list on
+            # transient failures so partial results from other sources still
+            # flow through. `fetch` lets the exception propagate so callers
+            # can distinguish "id unknown" from "source unreachable."
             return []
         return _parse_feed(body)
 
@@ -83,12 +89,10 @@ class ArxivSource:
         bare = paper_id.removeprefix("arxiv:")
         params = {"id_list": bare, "max_results": "1"}
         body = await self._fetch(params)
-        if body is None:
-            return None
         papers = _parse_feed(body)
         return papers[0] if papers else None
 
-    async def _fetch(self, params: dict[str, str]) -> bytes | None:
+    async def _fetch(self, params: dict[str, str]) -> bytes:
         cache_key = "&".join(f"{k}={v}" for k, v in sorted(params.items()))
         cached = self._cache.get(cache_key)
         if cached is not None:
@@ -97,9 +101,9 @@ class ArxivSource:
         try:
             response = await self._client.get(_API_URL, params=params)
             response.raise_for_status()
-        except httpx.HTTPError:
-            _log.exception("arxiv request failed for %s", params)
-            return None
+        except httpx.HTTPError as exc:
+            _log.warning("arxiv request failed for %s: %s", params, exc)
+            raise SourceUnavailable(self.name, str(exc)) from exc
         body = response.content
         self._cache.set(cache_key, body)
         return body
