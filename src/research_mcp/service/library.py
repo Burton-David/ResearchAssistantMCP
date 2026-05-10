@@ -4,6 +4,10 @@ Composes Index + Embedder + one or more ingest Sources. Each Source's
 `fetch` is asked in turn until one resolves the id; this is how the same
 service handles `arxiv:1706.03762`, `doi:10.1038/...`, and `s2:abc123`
 without a separate prefix table at the wiring layer.
+
+The id-resolution loop is also exposed as the free `fetch_from_sources`
+function so callers that don't need an embedder (cite_paper, get_paper)
+can resolve ids without depending on a fully constructed LibraryService.
 """
 
 from __future__ import annotations
@@ -15,6 +19,32 @@ from research_mcp.domain.index import Index
 from research_mcp.domain.paper import Paper
 from research_mcp.domain.source import Source
 from research_mcp.errors import SourceUnavailable
+
+
+async def fetch_from_sources(
+    sources: Sequence[Source], paper_id: str
+) -> Paper | None:
+    """Walk Sources in order, return the first hit.
+
+    Three outcomes:
+      - A Source returned a Paper: that Paper.
+      - Every Source returned None (id not owned by any of them): None.
+      - At least one Source raised `SourceUnavailable` and no Source
+        returned a Paper: re-raises the first `SourceUnavailable`.
+    """
+    first_unavailable: SourceUnavailable | None = None
+    for source in sources:
+        try:
+            paper = await source.fetch(paper_id)
+        except SourceUnavailable as exc:
+            if first_unavailable is None:
+                first_unavailable = exc
+            continue
+        if paper is not None:
+            return paper
+    if first_unavailable is not None:
+        raise first_unavailable
+    return None
 
 
 class PaperNotFoundError(LookupError):
@@ -52,28 +82,10 @@ class LibraryService:
     async def fetch(self, paper_id: str) -> Paper | None:
         """Resolve a paper id against the configured Sources in order.
 
-        Three outcomes:
-          - A Source returned a Paper: that Paper.
-          - Every Source returned None (id not owned by any of them): None.
-          - At least one Source raised `SourceUnavailable` and no Source
-            returned a Paper: re-raises the first `SourceUnavailable`. We
-            don't have a definitive answer because at least one upstream
-            never responded; the caller decides whether to retry or give
-            up.
+        Thin wrapper around the free `fetch_from_sources`; both call sites
+        share the same routing logic.
         """
-        first_unavailable: SourceUnavailable | None = None
-        for source in self._sources:
-            try:
-                paper = await source.fetch(paper_id)
-            except SourceUnavailable as exc:
-                if first_unavailable is None:
-                    first_unavailable = exc
-                continue
-            if paper is not None:
-                return paper
-        if first_unavailable is not None:
-            raise first_unavailable
-        return None
+        return await fetch_from_sources(self._sources, paper_id)
 
     async def ingest(self, paper_id: str) -> Paper:
         paper = await self.fetch(paper_id)

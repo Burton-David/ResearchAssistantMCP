@@ -1,9 +1,16 @@
 """MCP stdio server.
 
-Wires sources, embedder, index, and the citation registry into the four
-tool handlers. Default wiring uses real arXiv + Semantic Scholar + OpenAI
-embeddings + FAISS on disk; a `build_test_server` helper swaps in
-FakeEmbedder + MemoryIndex for the e2e harness.
+Wires sources, embedder, index, and the citation registry into the six
+tool handlers. Default wiring uses real arXiv + Semantic Scholar; the
+embedder is selected by `RESEARCH_MCP_EMBEDDER` (or auto-falls-back to
+OpenAI if `OPENAI_API_KEY` is set). When no embedder is configured, the
+server still serves search / cite / get_paper / library_status — only
+the embedder-using tools (ingest_paper, library_search) refuse, with
+a clear error message naming the env vars to set.
+
+`run_in_memory` exists for the e2e harness; selected by
+`RESEARCH_MCP_TEST_MODE=1` so the test can boot a real subprocess
+without needing API keys or a writable index path.
 """
 
 from __future__ import annotations
@@ -20,9 +27,15 @@ from mcp.server.stdio import stdio_server
 from research_mcp import __version__
 from research_mcp.citation import RENDERERS
 from research_mcp.domain.citation import CitationFormat
+from research_mcp.domain.embedder import Embedder
 from research_mcp.domain.paper import Paper
 from research_mcp.domain.query import SearchQuery
-from research_mcp.embedder import FakeEmbedder, OpenAIEmbedder
+from research_mcp.domain.source import Source
+from research_mcp.embedder import (
+    FakeEmbedder,
+    OpenAIEmbedder,
+    SentenceTransformersEmbedder,
+)
 from research_mcp.errors import SourceUnavailable
 from research_mcp.index import FaissIndex, MemoryIndex
 from research_mcp.mcp.tools import (
@@ -43,18 +56,63 @@ from research_mcp.mcp.tools import (
     source_from_id,
 )
 from research_mcp.service import LibraryService, SearchService
+from research_mcp.service.library import fetch_from_sources
 from research_mcp.sources import ArxivSource, SemanticScholarSource
 
 _log = logging.getLogger(__name__)
+
+_NO_EMBEDDER_HINT = (
+    "no embedder is configured. Set RESEARCH_MCP_EMBEDDER to "
+    "'openai:text-embedding-3-small' (requires OPENAI_API_KEY) or "
+    "'sentence-transformers:BAAI/bge-base-en-v1.5' (requires "
+    "`pip install research-mcp[sentence-transformers]`)."
+)
+
+
+def _select_embedder() -> tuple[Embedder | None, str | None]:
+    """Resolve the embedder selection from the environment.
+
+    Returns (embedder, label) where label is the wire-level selection
+    string for telemetry / library_status. (None, None) when nothing is
+    configured — in which case the embedder-using tools degrade with a
+    clear error message.
+    """
+    spec = os.environ.get("RESEARCH_MCP_EMBEDDER", "").strip()
+    if spec:
+        kind, _, model = spec.partition(":")
+        kind = kind.strip().lower()
+        model = model.strip()
+        if kind == "openai":
+            return OpenAIEmbedder(model or "text-embedding-3-small"), spec
+        if kind in {"sentence-transformers", "st"}:
+            return (
+                SentenceTransformersEmbedder(
+                    model or "BAAI/bge-base-en-v1.5"
+                ),
+                spec,
+            )
+        raise RuntimeError(
+            f"RESEARCH_MCP_EMBEDDER={spec!r} not understood. "
+            "Use 'openai:<model>' or 'sentence-transformers:<model>'."
+        )
+    if os.environ.get("OPENAI_API_KEY"):
+        return OpenAIEmbedder(), "openai:text-embedding-3-small"
+    return None, None
 
 
 def build_server(
     *,
     search: SearchService,
-    library: LibraryService,
     paper_lookup: Callable[[str], Awaitable[Paper | None]],
+    library: LibraryService | None,
+    embedder_label: str | None,
 ) -> Server[Any, Any]:
-    """Construct an MCP `Server` with the four research tools registered."""
+    """Construct an MCP `Server` with the six research tools registered.
+
+    `library` may be None if no embedder is configured. In that mode the
+    server still serves search/cite/get_paper/library_status; only
+    ingest_paper and library_search refuse.
+    """
     server: Server[Any, Any] = Server("research-mcp", version=__version__)
 
     # mcp SDK ships its decorators as untyped at the moment.
@@ -65,7 +123,9 @@ def build_server(
                 name="search_papers",
                 description=(
                     "Search arXiv and Semantic Scholar in parallel and return "
-                    "deduplicated metadata for each paper."
+                    "deduplicated, cross-source-enriched metadata for each "
+                    "paper. Each result carries a `source` field naming which "
+                    "adapter(s) contributed."
                 ),
                 inputSchema=SearchPapersInput.model_json_schema(),
             ),
@@ -73,7 +133,9 @@ def build_server(
                 name="ingest_paper",
                 description=(
                     "Fetch a paper by canonical id and add it to the local "
-                    "FAISS-backed library so it can be recalled by similarity."
+                    "FAISS-backed library so it can be recalled by similarity. "
+                    "Requires an embedder; see library_status if unsure whether "
+                    "the server is configured for ingest."
                 ),
                 inputSchema=IngestPaperInput.model_json_schema(),
             ),
@@ -81,7 +143,8 @@ def build_server(
                 name="library_search",
                 description=(
                     "Semantic search across the local library; returns the top-k "
-                    "ingested papers with similarity scores."
+                    "ingested papers with similarity scores. Requires an "
+                    "embedder."
                 ),
                 inputSchema=LibrarySearchInput.model_json_schema(),
             ),
@@ -98,9 +161,9 @@ def build_server(
             mcp_types.Tool(
                 name="library_status",
                 description=(
-                    "Report the number of papers currently in the local "
-                    "library. Useful for verifying ingest state without "
-                    "needing to ingest another paper."
+                    "Report library state: paper count, configured embedder, "
+                    "any setup hints. Use to verify the server is wired for "
+                    "ingest before attempting one."
                 ),
                 inputSchema=LibraryStatusInput.model_json_schema(),
             ),
@@ -133,6 +196,8 @@ def build_server(
         ).model_dump()
 
     async def _do_ingest(arguments: dict[str, Any]) -> dict[str, Any]:
+        if library is None:
+            raise ValueError(f"ingest_paper unavailable: {_NO_EMBEDDER_HINT}")
         args = IngestPaperInput.model_validate(arguments)
         paper = await library.ingest(args.paper_id)
         return IngestPaperOutput(
@@ -141,6 +206,8 @@ def build_server(
         ).model_dump()
 
     async def _do_recall(arguments: dict[str, Any]) -> dict[str, Any]:
+        if library is None:
+            raise ValueError(f"library_search unavailable: {_NO_EMBEDDER_HINT}")
         args = LibrarySearchInput.model_validate(arguments)
         results = await library.recall(args.query, k=args.k)
         return LibrarySearchOutput(
@@ -176,7 +243,17 @@ def build_server(
 
     async def _do_status(arguments: dict[str, Any]) -> dict[str, Any]:
         LibraryStatusInput.model_validate(arguments)
-        return LibraryStatusOutput(count=await library.count()).model_dump()
+        if library is None:
+            return LibraryStatusOutput(
+                count=0,
+                embedder=None,
+                note=_NO_EMBEDDER_HINT,
+            ).model_dump()
+        return LibraryStatusOutput(
+            count=await library.count(),
+            embedder=embedder_label,
+            note=None,
+        ).model_dump()
 
     async def _do_get_paper(arguments: dict[str, Any]) -> dict[str, Any]:
         args = GetPaperInput.model_validate(arguments)
@@ -224,23 +301,44 @@ def build_server(
 
 
 async def run_default() -> None:
-    """Production wiring: real APIs, OpenAI embeddings, FAISS on disk."""
+    """Production wiring: real arXiv + S2; embedder selected from env.
+
+    With no embedder configured, the server still boots in degraded mode
+    (search/cite/get_paper work; ingest/recall refuse with a clear hint).
+    """
     arxiv = ArxivSource()
     s2 = SemanticScholarSource()
-    embedder = OpenAIEmbedder()
-    index_path = os.environ.get("RESEARCH_MCP_INDEX_PATH")
-    if not index_path:
-        raise RuntimeError(
-            "RESEARCH_MCP_INDEX_PATH is required when running the MCP server. "
-            "Set it to a writable directory; FAISS files will live there."
-        )
-    index = FaissIndex(index_path, dimension=embedder.dimension)
-    library = LibraryService(
-        index=index, embedder=embedder, ingest_sources=[arxiv, s2]
-    )
-    search = SearchService([arxiv, s2])
+    sources: tuple[Source, ...] = (arxiv, s2)
+    search = SearchService(sources)
 
-    server = build_server(search=search, library=library, paper_lookup=library.fetch)
+    embedder, label = _select_embedder()
+    library: LibraryService | None = None
+    index_to_close: FaissIndex | None = None
+    if embedder is not None:
+        index_path = os.environ.get("RESEARCH_MCP_INDEX_PATH")
+        if not index_path:
+            raise RuntimeError(
+                "RESEARCH_MCP_INDEX_PATH is required when an embedder is "
+                "configured. Set it to a writable directory; FAISS files "
+                "will live there."
+            )
+        index = FaissIndex(index_path, dimension=embedder.dimension)
+        index_to_close = index
+        library = LibraryService(
+            index=index, embedder=embedder, ingest_sources=sources
+        )
+    else:
+        _log.warning("no embedder configured: %s", _NO_EMBEDDER_HINT)
+
+    async def paper_lookup(paper_id: str) -> Paper | None:
+        return await fetch_from_sources(sources, paper_id)
+
+    server = build_server(
+        search=search,
+        paper_lookup=paper_lookup,
+        library=library,
+        embedder_label=label,
+    )
     try:
         async with stdio_server() as (read_stream, write_stream):
             await server.run(
@@ -251,7 +349,8 @@ async def run_default() -> None:
     finally:
         await arxiv.aclose()
         await s2.aclose()
-        index.close()
+        if index_to_close is not None:
+            index_to_close.close()
 
 
 async def run_in_memory() -> None:
@@ -261,12 +360,21 @@ async def run_in_memory() -> None:
     server subprocess without needing OpenAI or a writable index path.
     """
     arxiv = ArxivSource()
+    sources: tuple[Source, ...] = (arxiv,)
     embedder = FakeEmbedder(64)
     index = MemoryIndex(embedder.dimension)
-    library = LibraryService(index=index, embedder=embedder, ingest_sources=[arxiv])
-    search = SearchService([arxiv])
+    library = LibraryService(index=index, embedder=embedder, ingest_sources=sources)
+    search = SearchService(sources)
 
-    server = build_server(search=search, library=library, paper_lookup=library.fetch)
+    async def paper_lookup(paper_id: str) -> Paper | None:
+        return await fetch_from_sources(sources, paper_id)
+
+    server = build_server(
+        search=search,
+        paper_lookup=paper_lookup,
+        library=library,
+        embedder_label="fake:test-mode",
+    )
     try:
         async with stdio_server() as (read_stream, write_stream):
             await server.run(

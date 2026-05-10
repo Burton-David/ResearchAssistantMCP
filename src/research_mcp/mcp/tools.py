@@ -163,6 +163,12 @@ class CitePaperOutput(BaseModel):
 
 class LibraryStatusOutput(BaseModel):
     count: int
+    embedder: str | None = None
+    """Embedder selection string ('openai:...', 'sentence-transformers:...').
+    None when no embedder is configured — in which case `count` is 0 and
+    ingest/recall tools will refuse with a helpful message."""
+    note: str | None = None
+    """Human-readable hint shown when the library isn't fully configured."""
 
 
 class GetPaperOutput(BaseModel):

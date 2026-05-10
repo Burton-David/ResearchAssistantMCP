@@ -17,12 +17,9 @@ import click
 
 from research_mcp.citation import RENDERERS
 from research_mcp.domain.citation import CitationFormat
-from research_mcp.domain.embedder import Embedder
-from research_mcp.domain.index import Index
 from research_mcp.domain.query import SearchQuery
 from research_mcp.domain.source import Source
-from research_mcp.embedder import FakeEmbedder, OpenAIEmbedder
-from research_mcp.index import FaissIndex, MemoryIndex
+from research_mcp.index import FaissIndex
 from research_mcp.service import LibraryService, SearchService
 from research_mcp.sources import ArxivSource, SemanticScholarSource
 
@@ -35,6 +32,15 @@ class _CliLibrary:
     s2: SemanticScholarSource
     library: LibraryService
     index_close: Callable[[], None] | None
+
+
+def _embedder_unavailable_error() -> click.ClickException:
+    return click.ClickException(
+        "no embedder configured. Set RESEARCH_MCP_EMBEDDER to "
+        "'openai:text-embedding-3-small' (with OPENAI_API_KEY) or "
+        "'sentence-transformers:BAAI/bge-base-en-v1.5' (after "
+        "`pip install research-mcp[sentence-transformers]`)."
+    )
 
 
 @click.group(invoke_without_command=True)
@@ -163,15 +169,14 @@ def cite(paper_id: str, fmt: str) -> None:
 
 
 async def _cite(paper_id: str, fmt: str) -> None:
+    """CLI cite uses the same source-resolution logic as the MCP cite_paper —
+    no embedder needed."""
+    from research_mcp.service.library import fetch_from_sources
+
     arxiv = ArxivSource()
     s2 = SemanticScholarSource()
     try:
-        paper = None
-        prefix = paper_id.split(":", 1)[0]
-        if prefix == "arxiv":
-            paper = await arxiv.fetch(paper_id)
-        elif prefix in {"s2", "doi"}:
-            paper = await s2.fetch(paper_id)
+        paper = await fetch_from_sources([arxiv, s2], paper_id)
         if paper is None:
             click.echo(f"Paper not found: {paper_id}", err=True)
             sys.exit(1)
@@ -182,29 +187,26 @@ async def _cite(paper_id: str, fmt: str) -> None:
 
 
 def _build_library_for_cli() -> _CliLibrary:
-    """Wire a LibraryService for CLI use.
+    """Wire a LibraryService for CLI use, sharing embedder selection with the
+    MCP server entry point. No embedder configured → click error.
 
-    With both `OPENAI_API_KEY` and `RESEARCH_MCP_INDEX_PATH` set, uses real
-    OpenAI embeddings + persistent FAISS so `ingest`/`recall` cumulate across
-    invocations. Otherwise falls back to FakeEmbedder + MemoryIndex so the
-    CLI still works with no API keys (results don't persist between runs).
+    Requires `RESEARCH_MCP_INDEX_PATH` so ingest/recall persist across CLI
+    invocations.
     """
+    from research_mcp.mcp.server import _select_embedder
+
+    embedder, _label = _select_embedder()
+    if embedder is None:
+        raise _embedder_unavailable_error()
+    if not os.environ.get("RESEARCH_MCP_INDEX_PATH"):
+        raise click.ClickException(
+            "RESEARCH_MCP_INDEX_PATH is required for ingest/recall — set it to "
+            "a writable directory; FAISS files will live there."
+        )
     arxiv = ArxivSource()
-    embedder: Embedder
-    index: Index
-    index_close: Callable[[], None] | None
-    if os.environ.get("OPENAI_API_KEY") and os.environ.get("RESEARCH_MCP_INDEX_PATH"):
-        oai = OpenAIEmbedder()
-        faiss = FaissIndex.from_env(oai.dimension)
-        embedder = oai
-        index = faiss
-        index_close = faiss.close
-    else:
-        embedder = FakeEmbedder(64)
-        index = MemoryIndex(embedder.dimension)
-        index_close = None
     s2 = SemanticScholarSource()
+    faiss = FaissIndex.from_env(embedder.dimension)
     library = LibraryService(
-        index=index, embedder=embedder, ingest_sources=[arxiv, s2]
+        index=faiss, embedder=embedder, ingest_sources=[arxiv, s2]
     )
-    return _CliLibrary(arxiv=arxiv, s2=s2, library=library, index_close=index_close)
+    return _CliLibrary(arxiv=arxiv, s2=s2, library=library, index_close=faiss.close)
