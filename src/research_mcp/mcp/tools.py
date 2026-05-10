@@ -162,6 +162,13 @@ class SearchPapersOutput(BaseModel):
     """Per-source transient failures (e.g. ['arxiv: HTTP 429']). When this
     is non-empty AND results is empty, the caller should retry rather than
     treat it as 'no papers exist'."""
+    source_contributions: dict[str, int] = {}
+    """Post-dedup paper count per configured source — e.g.,
+    {"arxiv": 3, "semantic_scholar": 4, "pubmed": 0, "openalex": 2}.
+    A zero entry means the source returned no results that survived
+    dedup (vs missing from the dict, which means the source isn't
+    configured). Use this to diagnose silent recall misses without
+    scraping per-result attribution."""
 
 
 class LibrarySearchHit(BaseModel):

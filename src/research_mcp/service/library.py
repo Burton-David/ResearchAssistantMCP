@@ -199,12 +199,17 @@ class LibraryService:
         return self._reranker
 
     async def fetch(self, paper_id: str) -> Paper | None:
-        """Resolve a paper id against the configured Sources in order.
+        """Resolve a paper id with cross-source enrichment.
 
-        Thin wrapper around the free `fetch_from_sources`; both call sites
-        share the same routing logic.
+        The chaos test caught a consistency bug: `get_paper` used
+        enrichment (returns "Neural Information Processing Systems" as
+        venue for Vaswani) but `ingest_paper`/`library_search` used the
+        non-enriched primary record (venue=null). The stored library
+        copy looked stale next to live reads. Single enrichment-aware
+        fetch closes the gap — anything that lands in the index now
+        carries the merged metadata.
         """
-        return await fetch_from_sources(self._sources, paper_id)
+        return await fetch_with_enrichment(self._sources, paper_id)
 
     async def ingest(self, paper_id: str) -> Paper:
         paper = await self.fetch(paper_id)

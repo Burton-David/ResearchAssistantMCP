@@ -19,13 +19,27 @@ from __future__ import annotations
 
 # Distinctive multi-word venue names. Match via word-boundary regex so
 # "ieee tpami" matches "IEEE TPAMI" and "IEEE Transactions on Pattern
-# Analysis and Machine Intelligence (TPAMI)" alike.
+# Analysis and Machine Intelligence (TPAMI)" alike. The full-form
+# entries ("neural information processing systems") were added after
+# the chaos test caught Vaswani scoring 50/100 — S2's enrichment
+# populated venue as the full long form, which didn't match the
+# short-form acronyms-only list.
 TOP_VENUE_PARTIAL_PATTERNS: frozenset[str] = frozenset(
     {
-        # CS / ML conferences (acronyms that don't collide with English words)
+        # CS / ML conference acronyms
         "neurips", "nips", "icml", "iclr", "cvpr", "iccv", "eccv",
         "emnlp", "naacl", "aaai", "ijcai", "siggraph", "icra",
         "popl", "pldi", "osdi", "sosp", "vldb", "sigmod",
+        # CS / ML conference long forms — S2 returns these on enrichment
+        "neural information processing systems",
+        "international conference on machine learning",
+        "international conference on learning representations",
+        "annual meeting of the association for computational linguistics",
+        "conference on empirical methods in natural language processing",
+        "conference on computer vision and pattern recognition",
+        "international conference on computer vision",
+        "european conference on computer vision",
+        "aaai conference on artificial intelligence",
         # CS / ML journals
         "ieee tpami", "jmlr", "tacl",
         "computational linguistics",

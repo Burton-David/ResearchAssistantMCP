@@ -31,7 +31,7 @@ import logging
 import re
 import unicodedata
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date
 from types import MappingProxyType
 
@@ -91,10 +91,21 @@ class SearchOutcome:
     "no papers match" (empty `results`, empty `partial_failures`) from
     "every source was rate-limited" (empty `results`, populated
     `partial_failures`). Callers should generally retry on the latter.
+
+    `source_contributions` maps each configured source name to the
+    number of UNIQUE papers it contributed to the merged result set
+    (post-dedup). A `{"pubmed": 0}` entry on a biomedical query means
+    PubMed returned nothing — distinct from PubMed erroring (which
+    appears in `partial_failures`). Surfaces "silent recall miss" vs
+    "transient failure" without forcing the caller to scrape result
+    attribution.
     """
 
     results: list[SearchResult]
     partial_failures: tuple[str, ...] = ()
+    source_contributions: Mapping[str, int] = field(
+        default_factory=lambda: MappingProxyType({})
+    )
 
 
 class SearchService:
@@ -223,12 +234,23 @@ class SearchService:
         merged = merged[: query.max_results]
         contributors = contributors[: query.max_results]
 
+        # Count post-dedup contributions per source so callers can
+        # diagnose "PubMed returned 0 results for a textbook PubMed
+        # query" without scraping result attribution. Every configured
+        # source appears in the dict, even those that contributed
+        # zero — explicit absence vs implicit absence.
+        contribution_counts: dict[str, int] = {s.name: 0 for s in self._sources}
+        for contributor_set in contributors:
+            for name in contributor_set:
+                contribution_counts[name] = contribution_counts.get(name, 0) + 1
+
         return SearchOutcome(
             results=[
                 SearchResult(paper=p, sources=tuple(sorted(s)))
                 for p, s in zip(merged, contributors, strict=True)
             ],
             partial_failures=tuple(failures),
+            source_contributions=MappingProxyType(contribution_counts),
         )
 
 

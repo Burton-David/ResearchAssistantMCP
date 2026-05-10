@@ -577,6 +577,7 @@ def build_server(
                 for r in outcome.results
             ],
             partial_failures=list(outcome.partial_failures),
+            source_contributions=dict(outcome.source_contributions),
         ).model_dump()
 
     async def _do_ingest(arguments: dict[str, Any]) -> dict[str, Any]:

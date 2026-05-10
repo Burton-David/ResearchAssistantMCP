@@ -57,10 +57,26 @@ ANALYSIS_SCHEMA: Final[dict[str, Any]] = {
             "description": "Named datasets used; preserve the exact names.",
         },
         "metrics_reported": {
-            "type": "object",
-            "additionalProperties": {"type": "number"},
-            "description": "Map of metric name → numeric headline value "
-            "(e.g., {'accuracy': 0.873}).",
+            # OpenAI's structured-output strict mode REJECTS schemas with
+            # open-ended `additionalProperties: <type>`; only `additional
+            # Properties: false` is allowed. We model the metrics as a
+            # list of (name, value) pairs and convert to a dict in the
+            # parser. Same expressive power, conformant to strict mode.
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "name": {"type": "string"},
+                    "value": {"type": "number"},
+                },
+                "required": ["name", "value"],
+            },
+            "description": (
+                "Headline numeric metrics as name/value pairs (e.g., "
+                "[{name: 'accuracy', value: 0.873}, {name: 'bleu', "
+                "value: 28.4}])."
+            ),
         },
         "baselines_compared": {
             "type": "array",

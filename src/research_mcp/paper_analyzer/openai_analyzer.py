@@ -104,13 +104,13 @@ class OpenAILLMPaperAnalyzer:
 def _payload_to_analysis(
     payload: dict[str, Any], *, paper_id: str, model_name: str
 ) -> PaperAnalysis:
-    """Lift the LLM's JSON output into the immutable domain object."""
-    metrics = payload.get("metrics_reported") or {}
-    if not isinstance(metrics, dict):
-        metrics = {}
-    cleaned_metrics = {
-        str(k): float(v) for k, v in metrics.items() if isinstance(v, int | float)
-    }
+    """Lift the LLM's JSON output into the immutable domain object.
+
+    `metrics_reported` is shaped as a list of {name, value} pairs in
+    the schema (strict-mode requires that — see _schema.py); we
+    convert back to the dict-shaped domain field here.
+    """
+    cleaned_metrics = _metrics_from_pairs(payload.get("metrics_reported"))
     return PaperAnalysis(
         paper_id=paper_id,
         summary=_pick_str(payload.get("summary")),
@@ -143,3 +143,18 @@ def _pick_confidence(value: Any) -> float:
     if isinstance(value, int | float):
         return max(0.0, min(1.0, float(value)))
     return 0.0
+
+
+def _metrics_from_pairs(value: Any) -> dict[str, float]:
+    """Convert [{name, value}, ...] from the LLM back to {name: value}."""
+    if not isinstance(value, list):
+        return {}
+    out: dict[str, float] = {}
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        name = item.get("name")
+        val = item.get("value")
+        if isinstance(name, str) and name.strip() and isinstance(val, int | float):
+            out[name.strip()] = float(val)
+    return out

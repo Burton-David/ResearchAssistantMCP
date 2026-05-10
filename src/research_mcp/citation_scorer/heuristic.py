@@ -262,13 +262,30 @@ def _score_author(paper: Paper) -> tuple[float, str]:
 
 
 def _score_recency(paper: Paper, now: _dt.date) -> tuple[float, str]:
+    """Score recency, but penalize 'fresh but unproven' papers.
+
+    Naive recency favors any new paper equally. The chaos test caught
+    this: a 2025 paper with 0 citations beat ACL 2021 (which had real
+    citations) because recency carried 13 of its 47 points. Fix is to
+    require an impact signal alongside recency: when `citation_count`
+    is None or 0 AND the paper is under 5 years old, drop the recency
+    contribution by 70%. This stops un-cited recent papers from
+    free-riding to the top of recommendation lists.
+    """
     if not paper.published:
         return 0.0, "Publication date unknown."
     years = max((now - paper.published).days / 365.25, 0.0)
-    # Linear decay over half-life years.
     factor = max(0.0, 1.0 - years / _RECENCY_HALF_LIFE_YEARS)
     score = _RECENCY_MAX * factor
-    return (
-        score,
-        f"Published {years:.1f} years ago.",
-    )
+
+    impact_unknown = paper.citation_count is None or paper.citation_count == 0
+    if impact_unknown and years < _RECENCY_HALF_LIFE_YEARS:
+        penalty = 0.3
+        score *= penalty
+        return (
+            score,
+            f"Published {years:.1f} years ago; recency contribution "
+            f"capped at {penalty * 100:.0f}% because citation impact "
+            "is unverified.",
+        )
+    return score, f"Published {years:.1f} years ago."

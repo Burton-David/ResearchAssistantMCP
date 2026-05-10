@@ -125,7 +125,13 @@ async def test_openai_lifts_payload_into_analysis() -> None:
         "limitations": ["Quadratic in sequence length"],
         "future_directions": ["Apply beyond NLP"],
         "datasets_used": ["WMT 2014 EN-DE", "WMT 2014 EN-FR"],
-        "metrics_reported": {"bleu_en_de": 28.4, "bleu_en_fr": 41.8},
+        # Schema models metrics as a list of {name, value} pairs (OpenAI
+        # strict mode rejects open-ended additionalProperties). Parser
+        # converts back to a dict.
+        "metrics_reported": [
+            {"name": "bleu_en_de", "value": 28.4},
+            {"name": "bleu_en_fr", "value": 41.8},
+        ],
         "baselines_compared": ["GNMT"],
         "confidence": 0.92,
     }
@@ -152,7 +158,7 @@ async def test_anthropic_lifts_payload_into_analysis() -> None:
         "limitations": ["Quadratic memory"],
         "future_directions": [],
         "datasets_used": ["WMT14"],
-        "metrics_reported": {"bleu": 28.4},
+        "metrics_reported": [{"name": "bleu", "value": 28.4}],
         "baselines_compared": [],
         "confidence": 0.88,
     }
@@ -224,6 +230,23 @@ def test_schema_is_strict_and_self_consistent() -> None:
     # Every required field must be defined in properties.
     for required in ANALYSIS_SCHEMA["required"]:
         assert required in ANALYSIS_SCHEMA["properties"]
+
+
+def test_schema_metrics_field_avoids_open_ended_additional_properties() -> None:
+    """OpenAI strict mode rejects schemas with `additionalProperties: <type>`
+    on nested objects — only `additionalProperties: false` is accepted.
+    The chaos test caught analyze_paper hanging because our schema had
+    metrics_reported typed as {type: object, additionalProperties:
+    {type: number}}, which 400's. Lock the fixed shape (array of
+    {name, value} pairs) so a refactor can't reintroduce the bug."""
+    metrics_schema = ANALYSIS_SCHEMA["properties"]["metrics_reported"]
+    assert metrics_schema["type"] == "array"
+    item_schema = metrics_schema["items"]
+    assert item_schema["type"] == "object"
+    assert item_schema["additionalProperties"] is False
+    assert set(item_schema["properties"]) == {"name", "value"}
+    assert item_schema["properties"]["name"]["type"] == "string"
+    assert item_schema["properties"]["value"]["type"] == "number"
 
 
 # ---- stubs ----
