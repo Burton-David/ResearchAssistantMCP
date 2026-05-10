@@ -9,6 +9,10 @@ transient failures from "id not owned by this Source."
 
 from __future__ import annotations
 
+import re
+
+_HTTP_CODE_RE = re.compile(r"\b([45]\d{2})\b")
+
 
 class ResearchMCPError(Exception):
     """Base for all research-mcp-defined exceptions."""
@@ -38,14 +42,17 @@ class SourceUnavailable(ResearchMCPError):  # noqa: N818  # state-of-the-source 
     def short_reason(self) -> str:
         """A user-friendly one-line summary, stripping URLs/stack traces.
 
-        httpx raises errors with messages like "Client error '429 ...' for
-        url 'https://...long-url...?...&...' For more information check
-        https://developer.mozilla.org/...". That entire ~600-char blob ends
-        up in cite_paper / get_paper error responses; LLM clients render
-        it inline. Collapse to a status-code-or-summary string."""
+        httpx raises errors like "Client error '429 ' for url
+        'https://...long-url...?...' For more information check
+        https://developer.mozilla.org/...". The whole ~600-char blob would
+        end up in cite_paper / get_paper error responses verbatim. Collapse
+        to a clean form by extracting the HTTP status code when present,
+        else stripping URLs and quoting noise.
+        """
         text = self.reason
-        # Most common case: httpx's error string starts with "<class>: <method>"
-        # then a quoted code, then "for url '...'". Cut at "for url".
+        match = _HTTP_CODE_RE.search(text)
+        if match:
+            return f"HTTP {match.group(1)}"
         for marker in (" for url", "\nFor more information"):
             if marker in text:
                 text = text.split(marker, 1)[0]

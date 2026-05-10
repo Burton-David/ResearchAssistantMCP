@@ -93,6 +93,14 @@ class SemanticScholarSource:
         return [paper for raw in data if (paper := _parse_paper(raw))]
 
     async def fetch(self, paper_id: str) -> Paper | None:
+        # Honor `id_prefixes`: the wiring layer routes ids by prefix, and a
+        # Source must not silently handle prefixes it doesn't claim. Without
+        # this guard, fetch("arxiv:9999.99999") would burn an API call here
+        # and bubble up S2's 404/429 even though ArxivSource is the rightful
+        # owner of the `arxiv:` prefix and already returned None for the id.
+        prefix = paper_id.split(":", 1)[0]
+        if prefix not in self.id_prefixes:
+            return None
         s2_id = _strip_prefix(paper_id)
         if s2_id is None:
             return None

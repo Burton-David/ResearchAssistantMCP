@@ -24,6 +24,7 @@ from typing import Any
 import mcp.types as mcp_types
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
+from pydantic import ValidationError
 
 from research_mcp import __version__
 from research_mcp.citation import RENDERERS
@@ -242,9 +243,10 @@ def build_server(
             paper = await paper_lookup(args.paper_id)
         except SourceUnavailable as exc:
             raise ValueError(
-                f"could not resolve {args.paper_id!r}: source "
-                f"{exc.source_name!r} is unavailable ({exc.short_reason()}). "
-                "This is usually transient — try again."
+                f"could not resolve {args.paper_id!r}: "
+                f"{exc.source_name} is unavailable ({exc.short_reason()}). "
+                "This is usually transient — try again. Valid id prefixes: "
+                "'arxiv:1706.03762', 'doi:10.1038/...', 's2:abc123'."
             ) from exc
         if paper is None:
             raise ValueError(
@@ -303,9 +305,10 @@ def build_server(
             paper = await paper_lookup(args.paper_id)
         except SourceUnavailable as exc:
             raise ValueError(
-                f"could not resolve {args.paper_id!r}: source "
-                f"{exc.source_name!r} is unavailable ({exc.short_reason()}). "
-                "This is usually transient — try again."
+                f"could not resolve {args.paper_id!r}: "
+                f"{exc.source_name} is unavailable ({exc.short_reason()}). "
+                "This is usually transient — try again. Valid id prefixes: "
+                "'arxiv:1706.03762', 'doi:10.1038/...', 's2:abc123'."
             ) from exc
         if paper is None:
             raise ValueError(
@@ -347,6 +350,18 @@ def build_server(
         start = time.monotonic()
         try:
             result = await handler(arguments)
+        except ValidationError as exc:
+            # Pydantic's default __str__ embeds a docs URL
+            # (https://errors.pydantic.dev/...) in the message. That leaks
+            # framework noise to the LLM client — same class of leakage we
+            # cleaned out of the SourceUnavailable path. Reformat to a
+            # clean "field: message" line and drop the URL.
+            elapsed_ms = (time.monotonic() - start) * 1000
+            _log.warning(
+                "tool=%s args=%s elapsed=%.0fms validation_error",
+                name, arg_keys, elapsed_ms,
+            )
+            raise ValueError(_format_validation_error(name, exc)) from exc
         except Exception as exc:
             elapsed_ms = (time.monotonic() - start) * 1000
             _log.warning(
@@ -362,6 +377,21 @@ def build_server(
         return result
 
     return server
+
+
+def _format_validation_error(tool_name: str, exc: ValidationError) -> str:
+    """Render a pydantic ValidationError as a clean, URL-free message.
+
+    Pydantic v2's default str(exc) includes a 'For further information visit
+    https://errors.pydantic.dev/...' line that should not reach the LLM.
+    """
+    parts: list[str] = []
+    for err in exc.errors():
+        field = ".".join(str(p) for p in err.get("loc", ()))
+        msg = err.get("msg", "validation failed")
+        parts.append(f"{field}: {msg}" if field else msg)
+    joined = "; ".join(parts) if parts else "invalid input"
+    return f"invalid arguments for {tool_name}: {joined}"
 
 
 def _result_hint(tool_name: str, result: dict[str, Any]) -> str:

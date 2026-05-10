@@ -158,6 +158,64 @@ def test_source_id_prefixes_are_correct_on_real_adapters() -> None:
     assert SemanticScholarSource.id_prefixes == ("s2", "doi")
 
 
+def test_short_reason_extracts_http_status_code() -> None:
+    """SourceUnavailable.short_reason() must collapse httpx's verbose error
+    string ('Client error \\'429 \\' for url \\'https://...\\'\\nFor more
+    information check https://...') down to a clean 'HTTP 429'."""
+    from research_mcp.errors import SourceUnavailable
+
+    raw = (
+        "Client error '429 ' for url 'https://api.semanticscholar.org/...'\n"
+        "For more information check: https://developer.mozilla.org/...429"
+    )
+    exc = SourceUnavailable("semantic_scholar", raw)
+    assert exc.short_reason() == "HTTP 429"
+
+
+def test_short_reason_falls_back_for_non_http_errors() -> None:
+    from research_mcp.errors import SourceUnavailable
+
+    exc = SourceUnavailable("arxiv", "DNS resolution failed")
+    assert exc.short_reason() == "DNS resolution failed"
+
+
+def test_format_validation_error_strips_pydantic_url() -> None:
+    """call_tool wraps pydantic ValidationError so the docs URL doesn't reach
+    the LLM client. The user sees a clean 'field: message' line."""
+    import pydantic
+
+    from research_mcp.mcp.server import _format_validation_error
+    from research_mcp.mcp.tools import SearchPapersInput
+
+    try:
+        SearchPapersInput.model_validate({"query": "x" * 600})
+    except pydantic.ValidationError as exc:
+        message = _format_validation_error("search_papers", exc)
+        assert "search_papers" in message
+        assert "query" in message
+        # The URL must NOT leak into the formatted message.
+        assert "errors.pydantic.dev" not in message
+        assert "https://" not in message
+
+
+def test_semantic_scholar_fetch_returns_none_for_arxiv_prefix() -> None:
+    """Honor id_prefixes: S2 declares ('s2', 'doi'); fetch must return None
+    for an arxiv-prefixed id rather than burning an API call. This was the
+    root cause of cite_paper for a typo'd arxiv id surfacing an S2 429."""
+    import asyncio
+
+    from research_mcp.sources import SemanticScholarSource
+
+    s2 = SemanticScholarSource()
+
+    async def run() -> None:
+        result = await s2.fetch("arxiv:9999.99999")
+        assert result is None
+        await s2.aclose()
+
+    asyncio.run(run())
+
+
 def test_paper_to_summary_truncates_huge_author_list() -> None:
     """A 600-author HEP paper should not blow the LLM's context."""
     from research_mcp.domain.paper import Author, Paper
