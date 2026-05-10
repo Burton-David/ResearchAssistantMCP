@@ -39,7 +39,7 @@ from research_mcp.domain.paper import Author, Paper
 from research_mcp.domain.query import SearchQuery
 from research_mcp.domain.reranker import Reranker
 from research_mcp.domain.source import Source
-from research_mcp.errors import SourceUnavailable
+from research_mcp.errors import SourceUnavailable, redact_secrets
 
 # When a reranker is configured, fetch this many times the user-requested
 # max_results from each Source before reranking. The standard recipe is
@@ -147,7 +147,10 @@ class SearchService:
                 per_source.append([])
                 continue
             if isinstance(outcome, BaseException):
-                _log.warning("source %r raised %s; ignoring", source.name, outcome)
+                _log.warning(
+                    "source %r raised %s; ignoring",
+                    source.name, redact_secrets(repr(outcome)),
+                )
                 failures.append(f"{source.name}: unexpected {type(outcome).__name__}")
                 per_source.append([])
                 continue

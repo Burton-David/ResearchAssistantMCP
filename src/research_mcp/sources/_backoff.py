@@ -27,6 +27,8 @@ from collections.abc import Awaitable, Callable
 
 import httpx
 
+from research_mcp.errors import redact_secrets
+
 _log = logging.getLogger(__name__)
 
 # Retry on rate-limited and transient server errors. 4xx other than 429
@@ -88,7 +90,8 @@ async def with_backoff(
                 raise
             _log.warning(
                 "%s: network error on attempt %d/%d (%s); retrying",
-                source_name, attempt + 1, len(delays) + 1, exc,
+                source_name, attempt + 1, len(delays) + 1,
+                redact_secrets(str(exc)),
             )
             continue
         if response.status_code not in _RETRYABLE_STATUS:

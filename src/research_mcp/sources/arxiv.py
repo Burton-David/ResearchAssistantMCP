@@ -19,6 +19,11 @@ from xml.etree import ElementTree as ET
 
 import httpx
 
+# defusedxml shadows ElementTree.fromstring with a hardened parser that
+# rejects billion-laughs / quadratic-blowup payloads. We keep the ET
+# import for type aliases (Element) and use defusedxml for parsing.
+from defusedxml import ElementTree as safe_xml  # noqa: N813
+
 from research_mcp.domain.paper import Author, Paper
 from research_mcp.domain.query import SearchQuery
 from research_mcp.errors import SourceUnavailable
@@ -138,7 +143,7 @@ def _build_search_string(query: SearchQuery) -> str:
 
 def _parse_feed(body: bytes) -> list[Paper]:
     try:
-        root = ET.fromstring(body)
+        root = safe_xml.fromstring(body)
     except ET.ParseError:
         _log.exception("arxiv feed parse error")
         return []

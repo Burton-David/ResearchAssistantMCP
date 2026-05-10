@@ -35,6 +35,11 @@ dependencies = [
     "openai>=1.30",
     "click>=8.1",
     "tiktoken>=0.7",
+    # XML from arxiv (Atom feed) and PubMed (E-utilities) is parsed via
+    # defusedxml — defends against billion-laughs / quadratic blowup
+    # attacks that `xml.etree.ElementTree` doesn't cap. Transparent
+    # drop-in replacement.
+    "defusedxml>=0.7",
 ]
 
 [project.optional-dependencies]

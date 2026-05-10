@@ -33,9 +33,14 @@ from xml.etree import ElementTree as ET
 
 import httpx
 
+# defusedxml shadows fromstring with a hardened parser that rejects
+# billion-laughs / quadratic-blowup payloads. We keep ET for the
+# Element type alias and use defusedxml for the parse call itself.
+from defusedxml import ElementTree as safe_xml  # noqa: N813
+
 from research_mcp.domain.paper import Author, Paper
 from research_mcp.domain.query import SearchQuery
-from research_mcp.errors import SourceUnavailable
+from research_mcp.errors import SourceUnavailable, redact_secrets
 from research_mcp.sources._backoff import with_backoff
 from research_mcp.sources._cache import DiskCache
 from research_mcp.sources._rate_limit import RateLimiter
@@ -183,8 +188,10 @@ class PubMedSource:
             response = await with_backoff(do_request, source_name=self.name)
             response.raise_for_status()
         except httpx.HTTPError as exc:
-            _log.warning("pubmed request failed for %s: %s", path, exc)
-            raise SourceUnavailable(self.name, str(exc)) from exc
+            # Scrub api_key= from logged URL — see errors.redact_secrets.
+            scrubbed = redact_secrets(str(exc))
+            _log.warning("pubmed request failed for %s: %s", path, scrubbed)
+            raise SourceUnavailable(self.name, scrubbed) from exc
         body = response.content
         self._cache.set(cache_key, body)
         return body
@@ -222,7 +229,7 @@ def _parse_pubmed_xml(body: bytes) -> list[Paper]:
     if not body:
         return []
     try:
-        root = ET.fromstring(body)
+        root = safe_xml.fromstring(body)
     except ET.ParseError:
         _log.exception("pubmed XML parse error")
         return []

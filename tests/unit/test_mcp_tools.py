@@ -484,3 +484,63 @@ def test_anthropic_extractor_passes_timeout_to_client_when_constructed() -> None
         assert float(timeout_attr) == 42.0
     else:
         assert float(timeout_attr.read) == 42.0
+
+
+def test_redact_secrets_strips_api_key_query_param() -> None:
+    """Pubmed (and any future source that puts a key in the query
+    string) must have it scrubbed before logging or surfacing in
+    SourceUnavailable.reason. NCBI's E-utilities accept api_key only
+    as a query param, so this is the realistic leak path."""
+    from research_mcp.errors import redact_secrets
+
+    raw = (
+        "Client error '429 ' for url 'https://eutils.ncbi.nlm.nih.gov/"
+        "entrez/eutils/efetch.fcgi?db=pubmed&id=12345&api_key=secret123"
+        "&email=test@example.com'"
+    )
+    scrubbed = redact_secrets(raw)
+    assert "secret123" not in scrubbed
+    assert "api_key=REDACTED" in scrubbed
+    # Non-secret params still visible.
+    assert "db=pubmed" in scrubbed
+    assert "email=" in scrubbed
+
+
+def test_redact_secrets_handles_first_param_position() -> None:
+    """`?api_key=...` (first query param, with `?` separator) and
+    `&api_key=...` (later, with `&`) must both match."""
+    from research_mcp.errors import redact_secrets
+
+    a = redact_secrets("https://x.com/path?api_key=abc123")
+    b = redact_secrets("https://x.com/path?other=ok&api_key=abc123")
+    assert "abc123" not in a
+    assert "abc123" not in b
+    assert "?api_key=REDACTED" in a
+    assert "&api_key=REDACTED" in b
+
+
+def test_redact_secrets_strips_token_and_secret_variants() -> None:
+    """Cover other secret-shaped parameter names too — defense in depth
+    for any future source that authenticates differently."""
+    from research_mcp.errors import redact_secrets
+
+    cases = [
+        ("?token=abc", "?token=REDACTED"),
+        ("?access_token=xyz", "?access_token=REDACTED"),
+        ("?secret=hunter2", "?secret=REDACTED"),
+        ("?api-key=dashed", "?api-key=REDACTED"),
+    ]
+    for raw, expected_fragment in cases:
+        scrubbed = redact_secrets(raw)
+        assert expected_fragment in scrubbed
+        # The original secret value is gone.
+        assert raw.split("=", 1)[1] not in scrubbed
+
+
+def test_redact_secrets_is_idempotent() -> None:
+    """Calling twice doesn't double-redact or break the URL."""
+    from research_mcp.errors import redact_secrets
+
+    once = redact_secrets("https://x.com/?api_key=abc")
+    twice = redact_secrets(once)
+    assert once == twice
