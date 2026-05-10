@@ -45,7 +45,12 @@ class CitePaperInput(_Strict):
     paper_id: str = Field(
         ...,
         min_length=1,
-        description="Canonical paper id, must already be in the local library.",
+        description=(
+            "Canonical paper id with source prefix (e.g. 'arxiv:1706.03762', "
+            "'doi:10.1038/...', 's2:abc...'). Fetches metadata from the "
+            "originating source on demand — the paper does NOT need to be "
+            "in the local library."
+        ),
     )
     format: CitationFormatLiteral = Field(
         "ama", description="Citation format. Defaults to AMA."

@@ -83,7 +83,9 @@ def build_server(
             mcp_types.Tool(
                 name="cite_paper",
                 description=(
-                    "Render a citation for a paper. Defaults to AMA; supports "
+                    "Render a citation for a paper id. Fetches metadata from "
+                    "the originating source on demand — does not require the "
+                    "paper to be ingested first. Defaults to AMA; supports "
                     "APA, MLA, Chicago, and BibTeX."
                 ),
                 inputSchema=CitePaperInput.model_json_schema(),
