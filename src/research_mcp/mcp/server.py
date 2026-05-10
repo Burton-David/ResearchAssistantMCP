@@ -35,6 +35,7 @@ from research_mcp.domain.citation import CitationFormat
 from research_mcp.domain.claim import ClaimExtractor
 from research_mcp.domain.embedder import Embedder
 from research_mcp.domain.paper import Paper
+from research_mcp.domain.paper_analyzer import AnalysisKind, PaperAnalyzer
 from research_mcp.domain.query import SearchQuery
 from research_mcp.domain.reranker import Reranker
 from research_mcp.domain.source import Source
@@ -46,6 +47,8 @@ from research_mcp.embedder import (
 from research_mcp.errors import SourceUnavailable
 from research_mcp.index import FaissIndex, MemoryIndex
 from research_mcp.mcp.tools import (
+    AnalyzePaperInput,
+    AnalyzePaperOutput,
     ChunkPaperInput,
     ChunkPaperOutput,
     CitationCandidateSummary,
@@ -71,6 +74,7 @@ from research_mcp.mcp.tools import (
     LibrarySearchOutput,
     LibraryStatusInput,
     LibraryStatusOutput,
+    PaperAnalysisSummary,
     ScoreCitationInput,
     ScoreCitationOutput,
     SearchPapersInput,
@@ -81,6 +85,7 @@ from research_mcp.mcp.tools import (
 )
 from research_mcp.reranker import HuggingFaceCrossEncoderReranker
 from research_mcp.service import DiscoveryService, LibraryService, SearchService
+from research_mcp.service.analysis import AnalysisService
 from research_mcp.service.citation import CitationService
 from research_mcp.service.library import fetch_from_sources
 from research_mcp.sources import (
@@ -213,6 +218,50 @@ async def _resolve_paper(paper_id: str, lookup: Callable[[str], Awaitable[Paper 
     return paper
 
 
+def _fake_analyzer_for_test_mode() -> PaperAnalyzer:
+    """Test-mode shortcut so e2e tests get an analysis_service without
+    needing OpenAI/Anthropic credentials. Lives here to keep the
+    `run_in_memory` wiring readable; production code never imports
+    FakePaperAnalyzer through this path."""
+    from research_mcp.paper_analyzer import FakePaperAnalyzer
+
+    return FakePaperAnalyzer()
+
+
+def _select_paper_analyzer() -> PaperAnalyzer | None:
+    """Resolve `RESEARCH_MCP_ANALYSIS_MODEL` to a PaperAnalyzer instance.
+
+    Format: `openai:<model>` or `anthropic:<model>`. Unset → None
+    (analyze_paper refuses with a clear hint). Construction failures
+    (missing API key, missing extra) are caught and logged so the
+    server still boots.
+    """
+    spec = os.environ.get("RESEARCH_MCP_ANALYSIS_MODEL", "").strip()
+    if not spec:
+        return None
+    kind, _, model = spec.partition(":")
+    kind = kind.strip().lower()
+    model = model.strip()
+    try:
+        if kind == "openai":
+            from research_mcp.paper_analyzer import OpenAILLMPaperAnalyzer
+
+            return OpenAILLMPaperAnalyzer(model=model or "gpt-4o-mini")
+        if kind == "anthropic":
+            from research_mcp.paper_analyzer import AnthropicLLMPaperAnalyzer
+
+            return AnthropicLLMPaperAnalyzer(
+                model=model or "claude-haiku-4-5-20251001"
+            )
+    except Exception as exc:  # pragma: no cover — env-specific failure
+        _log.warning("paper analyzer construction failed: %s", exc)
+        return None
+    raise RuntimeError(
+        f"RESEARCH_MCP_ANALYSIS_MODEL={spec!r} not understood. "
+        "Use 'openai:<model>' or 'anthropic:<model>'."
+    )
+
+
 def _select_claim_extractor() -> ClaimExtractor | None:
     """Try to construct the spaCy-backed claim extractor; return None on
     missing dependency rather than crashing the server.
@@ -244,6 +293,7 @@ def build_server(
     chunker: Chunker | None = None,
     claim_extractor: ClaimExtractor | None = None,
     citation_service: CitationService | None = None,
+    analysis_service: AnalysisService | None = None,
 ) -> Server[Any, Any]:
     """Construct an MCP `Server` with the six research tools registered.
 
@@ -383,6 +433,19 @@ def build_server(
                     "to a co-author or reviewer."
                 ),
                 inputSchema=ExplainCitationInput.model_json_schema(),
+            ),
+            mcp_types.Tool(
+                name="analyze_paper",
+                description=(
+                    "Use an LLM to extract structured analysis of a paper: "
+                    "summary, key contributions, methodology, technical "
+                    "approach, limitations, future directions, datasets, "
+                    "metrics, and baselines. Pass `kinds` to limit which "
+                    "fields are extracted (saves output tokens). Backed "
+                    "by OpenAI gpt-4o-mini or Anthropic claude-haiku, "
+                    "selected via RESEARCH_MCP_ANALYSIS_MODEL."
+                ),
+                inputSchema=AnalyzePaperInput.model_json_schema(),
             ),
         ]
 
@@ -573,6 +636,37 @@ def build_server(
             paper=paper_to_summary(paper, source=source_from_id(paper.id, search.sources)),
         ).model_dump()
 
+    async def _do_analyze_paper(arguments: dict[str, Any]) -> dict[str, Any]:
+        if analysis_service is None:
+            raise ValueError(
+                "analyze_paper unavailable: no analysis service configured. "
+                "Set RESEARCH_MCP_ANALYSIS_MODEL to "
+                "'openai:gpt-4o-mini' (requires OPENAI_API_KEY) or "
+                "'anthropic:claude-haiku-4-5-20251001' (requires "
+                "ANTHROPIC_API_KEY)."
+            )
+        args = AnalyzePaperInput.model_validate(arguments)
+        paper = await _resolve_paper(args.paper_id, paper_lookup)
+        kinds = tuple(AnalysisKind(k) for k in args.kinds)
+        analysis = await analysis_service.analyze(paper, kinds)
+        return AnalyzePaperOutput(
+            paper=paper_to_summary(paper, source=source_from_id(paper.id, search.sources)),
+            analysis=PaperAnalysisSummary(
+                paper_id=analysis.paper_id,
+                summary=analysis.summary,
+                key_contributions=list(analysis.key_contributions),
+                methodology=analysis.methodology,
+                technical_approach=analysis.technical_approach,
+                limitations=list(analysis.limitations),
+                future_directions=list(analysis.future_directions),
+                datasets_used=list(analysis.datasets_used),
+                metrics_reported=dict(analysis.metrics_reported),
+                baselines_compared=list(analysis.baselines_compared),
+                confidence=analysis.confidence,
+                model=analysis.model,
+            ),
+        ).model_dump()
+
     async def _do_find_paper(arguments: dict[str, Any]) -> dict[str, Any]:
         args = FindPaperInput.model_validate(arguments)
         outcome = await discovery.find_paper(
@@ -633,6 +727,7 @@ def build_server(
         "find_citations": _do_find_citations,
         "score_citation": _do_score_citation,
         "explain_citation": _do_explain_citation,
+        "analyze_paper": _do_analyze_paper,
     }
 
     # validate_input=False bypasses the mcp SDK's strict jsonschema check so
@@ -792,6 +887,7 @@ async def run_default() -> None:
     async def paper_lookup(paper_id: str) -> Paper | None:
         return await fetch_from_sources(sources, paper_id)
 
+    paper_analyzer = _select_paper_analyzer()
     server = build_server(
         search=search,
         discovery=discovery,
@@ -803,6 +899,11 @@ async def run_default() -> None:
         claim_extractor=_select_claim_extractor(),
         citation_service=CitationService(
             search=search, scorer=HeuristicCitationScorer()
+        ),
+        analysis_service=(
+            AnalysisService(analyzer=paper_analyzer)
+            if paper_analyzer is not None
+            else None
         ),
     )
     try:
@@ -854,6 +955,10 @@ async def run_in_memory() -> None:
         citation_service=CitationService(
             search=search, scorer=HeuristicCitationScorer()
         ),
+        # run_in_memory ignores RESEARCH_MCP_ANALYSIS_MODEL on purpose;
+        # the e2e harness uses FakePaperAnalyzer to avoid burning API
+        # credits on every test run.
+        analysis_service=AnalysisService(analyzer=_fake_analyzer_for_test_mode()),
     )
     try:
         async with stdio_server() as (read_stream, write_stream):

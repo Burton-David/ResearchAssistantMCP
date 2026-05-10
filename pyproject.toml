@@ -48,6 +48,7 @@ dev = [
 ]
 sentence-transformers = ["sentence-transformers>=2.7"]
 claim-extraction = ["spacy>=3.7"]
+paper-analysis = ["anthropic>=0.40"]
 
 [project.scripts]
 research-mcp = "research_mcp.cli:main"

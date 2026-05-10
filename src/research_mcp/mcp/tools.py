@@ -412,6 +412,58 @@ class ExplainCitationOutput(BaseModel):
     paper: PaperSummary
 
 
+# ---- analyze_paper ----
+
+AnalysisKindLiteral = Literal[
+    "summary",
+    "contributions",
+    "methodology",
+    "limitations",
+    "future_work",
+    "datasets",
+    "metrics",
+    "baselines",
+]
+
+
+class AnalyzePaperInput(_Strict):
+    paper_id: str = Field(
+        ..., min_length=1,
+        description="Canonical paper id (e.g. 'arxiv:1706.03762').",
+    )
+    kinds: list[AnalysisKindLiteral] = Field(
+        default_factory=list,
+        max_length=8,
+        description=(
+            "Which analysis kinds to extract. Empty = all kinds. Listing "
+            "fewer kinds reduces output tokens but doesn't shrink the "
+            "input prompt."
+        ),
+    )
+
+
+class PaperAnalysisSummary(BaseModel):
+    paper_id: str
+    summary: str | None
+    key_contributions: list[str]
+    methodology: str | None
+    technical_approach: str | None
+    limitations: list[str]
+    future_directions: list[str]
+    datasets_used: list[str]
+    metrics_reported: dict[str, float]
+    baselines_compared: list[str]
+    confidence: float
+    model: str
+    """Model identifier ('openai:gpt-4o-mini' / 'anthropic:claude-...' /
+    'fake:stub'). The caller can decide whether to trust the result."""
+
+
+class AnalyzePaperOutput(BaseModel):
+    paper: PaperSummary
+    analysis: PaperAnalysisSummary
+
+
 def paper_to_summary(paper: Paper, *, source: str = "") -> PaperSummary:
     """Project a `Paper` into the LLM-friendly summary view.
 
