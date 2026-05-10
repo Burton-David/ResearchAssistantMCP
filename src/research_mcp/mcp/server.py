@@ -216,7 +216,7 @@ def build_server(
         args = IngestPaperInput.model_validate(arguments)
         paper = await library.ingest(args.paper_id)
         return IngestPaperOutput(
-            paper=paper_to_summary(paper, source=source_from_id(paper.id)),
+            paper=paper_to_summary(paper, source=source_from_id(paper.id, search.sources)),
             library_count=await library.count(),
         ).model_dump()
 
@@ -228,7 +228,7 @@ def build_server(
         return LibrarySearchOutput(
             results=[
                 LibrarySearchHit(
-                    paper=paper_to_summary(p, source=source_from_id(p.id)),
+                    paper=paper_to_summary(p, source=source_from_id(p.id, search.sources)),
                     score=score,
                 )
                 for p, score in results
@@ -313,7 +313,7 @@ def build_server(
                 "or 's2:abc123'."
             )
         return GetPaperOutput(
-            paper=paper_to_summary(paper, source=source_from_id(paper.id))
+            paper=paper_to_summary(paper, source=source_from_id(paper.id, search.sources))
         ).model_dump()
 
     handlers: dict[str, Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]] = {

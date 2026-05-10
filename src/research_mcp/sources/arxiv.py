@@ -41,6 +41,7 @@ class ArxivSource:
     """A `Source` that fronts the arXiv Atom API."""
 
     name: str = "arxiv"
+    id_prefixes: tuple[str, ...] = ("arxiv",)
 
     def __init__(
         self,

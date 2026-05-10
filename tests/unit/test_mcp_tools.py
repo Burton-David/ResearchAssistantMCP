@@ -120,6 +120,44 @@ def test_paper_to_summary_handles_minimal_paper(vaswani_paper) -> None:  # type:
     assert summary.authors_total == 8
 
 
+def test_source_from_id_routes_via_id_prefixes() -> None:
+    """source_from_id must consult Source.id_prefixes, not hard-code adapter
+    names. Adding a third Source (PubMed, OpenAlex) should require zero
+    changes in the MCP layer."""
+    from research_mcp.mcp.tools import source_from_id
+
+    class _FakeSource:
+        def __init__(self, name: str, prefixes: tuple[str, ...]) -> None:
+            self.name = name
+            self.id_prefixes = prefixes
+
+        async def search(self, query):  # type: ignore[no-untyped-def]
+            return []
+
+        async def fetch(self, paper_id: str):  # type: ignore[no-untyped-def]
+            return None
+
+    arxiv = _FakeSource("arxiv", ("arxiv",))
+    s2 = _FakeSource("semantic_scholar", ("s2", "doi"))
+    pubmed = _FakeSource("pubmed", ("pmid",))
+    sources = [arxiv, s2, pubmed]
+
+    assert source_from_id("arxiv:1706.03762", sources) == "arxiv"
+    assert source_from_id("doi:10.1038/X", sources) == "semantic_scholar"
+    assert source_from_id("s2:abc123", sources) == "semantic_scholar"
+    assert source_from_id("pmid:12345678", sources) == "pubmed"
+    # Unknown prefix falls through to the bare prefix string.
+    assert source_from_id("isbn:9780123456", sources) == "isbn"
+
+
+def test_source_id_prefixes_are_correct_on_real_adapters() -> None:
+    """Lock down the prefix declarations on the live adapters."""
+    from research_mcp.sources import ArxivSource, SemanticScholarSource
+
+    assert ArxivSource.id_prefixes == ("arxiv",)
+    assert SemanticScholarSource.id_prefixes == ("s2", "doi")
+
+
 def test_paper_to_summary_truncates_huge_author_list() -> None:
     """A 600-author HEP paper should not blow the LLM's context."""
     from research_mcp.domain.paper import Author, Paper

@@ -7,12 +7,14 @@ for tests; the server returns plain dicts via `model_dump`.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from research_mcp.domain.citation import CitationFormat
 from research_mcp.domain.paper import Paper
+from research_mcp.domain.source import Source
 
 CitationFormatLiteral = Literal["ama", "apa", "mla", "chicago", "bibtex"]
 
@@ -241,23 +243,23 @@ def paper_to_summary(paper: Paper, *, source: str = "") -> PaperSummary:
     )
 
 
-_PREFIX_TO_SOURCE_NAME = {
-    "arxiv": "arxiv",
-    "doi": "semantic_scholar",
-    "s2": "semantic_scholar",
-}
-
-
-def source_from_id(paper_id: str) -> str:
-    """Map a canonical id prefix to the adapter name that produced it.
+def source_from_id(paper_id: str, sources: Sequence[Source]) -> str:
+    """Find which Source's `id_prefixes` claim this paper id, return its `name`.
 
     Used when a Paper isn't carrying provenance through SearchService —
     e.g., responses from `ingest_paper`, `cite_paper`, `get_paper` that
-    came out of `LibraryService.fetch`. Cite/get_paper currently route
-    `doi:` ids through Semantic Scholar.
+    came out of `LibraryService.fetch`. The first Source in `sources`
+    whose `id_prefixes` contains the id's prefix wins.
+
+    Falls back to the bare prefix string when no Source claims it. That
+    keeps the response well-formed (LLM still sees a non-empty `source`)
+    without lying about provenance.
     """
     prefix = paper_id.split(":", 1)[0]
-    return _PREFIX_TO_SOURCE_NAME.get(prefix, prefix)
+    for source in sources:
+        if prefix in source.id_prefixes:
+            return source.name
+    return prefix
 
 
 def to_citation_format(value: str) -> CitationFormat:

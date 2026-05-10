@@ -44,6 +44,7 @@ class SemanticScholarSource:
     """A `Source` that fronts the Semantic Scholar Graph API."""
 
     name: str = "semantic_scholar"
+    id_prefixes: tuple[str, ...] = ("s2", "doi")
 
     def __init__(
         self,
