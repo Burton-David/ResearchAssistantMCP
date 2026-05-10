@@ -21,11 +21,17 @@ flow.
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 
 from research_mcp.domain.claim import Claim, ClaimExtractor
 from research_mcp.domain.paper import Paper
 from research_mcp.service.citation import CitationCandidate, CitationService
+
+# Callback shape: (completed, total, message) → awaitable. Called once
+# per claim as recommendations finish (in completion order, not input
+# order). `None` means progress reporting is disabled.
+ProgressCallback = Callable[[int, int, str], Awaitable[None]]
 
 
 @dataclass(frozen=True, slots=True)
@@ -68,15 +74,45 @@ class DraftService:
         text: str,
         *,
         k_per_claim: int = 3,
+        progress: ProgressCallback | None = None,
     ) -> tuple[CitationRecommendation, ...]:
+        """Run the full draft → claims → citations → explanations pipeline.
+
+        When `progress` is provided, it's invoked after each claim's
+        recommendation completes (in completion order, not document
+        order). Total is reported as len(claims) + 1 to count the
+        initial claim-extraction step as 0/N+1 → 1/N+1 → … → N+1/N+1.
+        Used by the MCP layer to stream progress notifications when
+        the client passed a progressToken with the call.
+        """
         if not text or not text.strip():
             return ()
+        if progress is not None:
+            await progress(0, 1, "extracting claims...")
         claims = await self._extractor.extract(text)
         if not claims:
+            if progress is not None:
+                await progress(1, 1, "no claims found")
             return ()
-        recommendations = await asyncio.gather(
-            *(self._recommend(claim, k_per_claim) for claim in claims)
-        )
+
+        total = len(claims) + 1
+        if progress is not None:
+            await progress(1, total, f"found {len(claims)} claims")
+
+        completed = 1
+        completed_lock = asyncio.Lock()
+
+        async def _track(claim: Claim) -> CitationRecommendation:
+            rec = await self._recommend(claim, k_per_claim)
+            if progress is not None:
+                nonlocal completed
+                async with completed_lock:
+                    completed += 1
+                    snapshot = completed
+                await progress(snapshot, total, f"claim {snapshot - 1} of {len(claims)} done")
+            return rec
+
+        recommendations = await asyncio.gather(*(_track(c) for c in claims))
         return tuple(recommendations)
 
     async def _recommend(

@@ -20,27 +20,27 @@ LLMs are good at synthesis and bad at sourcing. Off-the-shelf web search returns
 
 ## What it does
 
-Fourteen MCP tools the LLM calls directly, organized by stage of the research workflow:
+Twelve MCP tools the LLM calls directly, organized by stage of the research workflow.
 
 **Citation assistance**
-- **`assist_draft`** — the killer demo: draft → claims → ranked, explained citation recommendations.
+- **`assist_draft`** — the killer demo: draft → claims → ranked, explained citation recommendations. Streams progress notifications when the client supplies a `progressToken`, so the LLM sees "claim 3/8 done" updates as the pipeline runs.
 - **`extract_claims`** — scan draft text and tag claims (statistical, methodological, comparative, causal, theoretical) with confidence + suggested search terms.
-- **`find_citations`** — given a claim, return top-k candidate papers with quality scores.
-- **`score_citation`** — quality breakdown for a paper: venue tier, citation impact, recency, warnings (predatory venue, retracted).
-- **`explain_citation`** — strong/moderate/weak verdict for citing a specific paper as evidence for a specific claim.
+- **`find_citations`** — given a claim, return top-k candidate papers with quality scores and warnings.
+- **`explain_citation`** — strong/moderate/weak verdict for citing a specific paper as evidence for a specific claim. Returns the full quality-score breakdown alongside the explanation.
 
 **Paper analysis**
 - **`analyze_paper`** — LLM-driven structured extraction (summary, contributions, methodology, datasets, metrics, baselines). Backed by OpenAI gpt-4o-mini or Anthropic claude-haiku, selected via env.
-- **`chunk_paper`** — section-aware chunking (abstract, introduction, methodology, …) of full text.
 
 **Search and corpus**
-- **`search_papers`** — arXiv + Semantic Scholar + PubMed + OpenAlex in parallel, with cross-source enrichment (DOI from S2 doesn't get thrown away when arXiv is the first source) and provenance tracking.
-- **`find_paper`** — title-and-author lookup with Jaccard re-ranking, for when you have a citation but no canonical id.
-- **`ingest_paper`** / **`bulk_ingest`** — pull metadata into a local FAISS index, one paper at a time or N from a search query.
+- **`search_papers`** — arXiv + Semantic Scholar + PubMed + OpenAlex in parallel, with cross-source enrichment and provenance tracking. Returns a `source_contributions` dict naming how many results each source contributed.
+- **`find_paper`** — title-and-author lookup with Jaccard re-ranking. **This is the right tool for canonical-paper lookups** (e.g., "find Vaswani et al.'s Attention paper") — `search_papers` is for general queries where the canonical paper might not survive the API's relevance ranking.
+- **`ingest_paper`** — add to the local FAISS-backed library, by canonical id (single paper) or by `query` + `max_papers` (bulk-ingest top-N from search).
 - **`library_search`** — semantic recall over your local library, top-k with similarity scores.
 - **`cite_paper`** — render any paper as AMA, APA, MLA, Chicago, or BibTeX. Fetches metadata on demand; ingest not required.
-- **`get_paper`** — preview full Paper metadata for an id without ingesting.
-- **`library_status`** — paper count, configured embedder/reranker/extractor/scorer, setup hints if anything's missing.
+- **`get_paper`** — preview full Paper metadata for an id, with cross-source enrichment for venue / DOI / citation count.
+- **`library_status`** — paper count plus the configured embedder / reranker / source list / claim extractor / paper analyzer / citation scorer. Single call confirms the entire wiring.
+
+**Plus one MCP prompt template:** `review_draft_for_citations` — bundles the right framing for `assist_draft` so a researcher who opens Claude Desktop's prompt menu sees an obvious entry point.
 
 ## Quick start
 
@@ -128,6 +128,8 @@ PaperAnalyzer     paper → structured analysis    (openai, anthropic, fake)
 ```
 
 Six services compose them: `SearchService`, `LibraryService`, `DiscoveryService`, `CitationService`, `AnalysisService`, `DraftService`. The MCP server wires services into tools but knows nothing about specific implementations — swapping FAISS for Chroma, OpenAI for a local LLM, or spaCy for a transformer-based extractor is a one-line change in the wiring module.
+
+For an example of orchestrating these services from pure Python (no MCP server in the middle), see [`examples/orchestrator_demo.py`](examples/orchestrator_demo.py). The same composition pattern wraps cleanly under the Claude Agent SDK — comments inside the file sketch the ~10-line agent variant.
 
 See [docs/architecture.md](docs/architecture.md) and the ADRs at [docs/adr/](docs/adr/).
 

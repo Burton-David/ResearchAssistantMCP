@@ -28,10 +28,8 @@ from mcp.server.stdio import stdio_server
 from pydantic import ValidationError
 
 from research_mcp import __version__
-from research_mcp.chunker import SectionAwareChunker
 from research_mcp.citation import RENDERERS
 from research_mcp.citation_scorer import HeuristicCitationScorer
-from research_mcp.domain.chunker import Chunker
 from research_mcp.domain.citation import CitationFormat
 from research_mcp.domain.claim import ClaimExtractor
 from research_mcp.domain.embedder import Embedder
@@ -52,10 +50,6 @@ from research_mcp.mcp.tools import (
     AnalyzePaperOutput,
     AssistDraftInput,
     AssistDraftOutput,
-    BulkIngestInput,
-    BulkIngestOutput,
-    ChunkPaperInput,
-    ChunkPaperOutput,
     CitationCandidateSummary,
     CitationQualityScoreSummary,
     CitationRecommendationCandidateSummary,
@@ -82,11 +76,8 @@ from research_mcp.mcp.tools import (
     LibraryStatusInput,
     LibraryStatusOutput,
     PaperAnalysisSummary,
-    ScoreCitationInput,
-    ScoreCitationOutput,
     SearchPapersInput,
     SearchPapersOutput,
-    TextChunkSummary,
     paper_to_summary,
     source_from_id,
 )
@@ -121,18 +112,13 @@ _TOOL_TIMEOUTS: Final[dict[str, float]] = {
     "get_paper": 60.0,
     "library_status": 10.0,
     "library_search": 60.0,
-    # Tightened from 90s. Realistic ingest is fetch (1-3s) + embed (1-2s)
-    # + faiss upsert (<1s). 60s budget catches a wedged upstream early.
-    "ingest_paper": 60.0,
-    "bulk_ingest": 180.0,
-    "chunk_paper": 60.0,
+    # ingest_paper now covers both single-id (~5s) and query-mode (search
+    # + N parallel embed-and-upsert, up to ~60s). 180s covers the query
+    # form's worst case; single-id calls return well inside the budget.
+    "ingest_paper": 180.0,
     "extract_claims": 90.0,
     "find_citations": 150.0,
-    "score_citation": 60.0,
     "explain_citation": 60.0,
-    # Tightened from 150s. analyze_paper is one OpenAI/Anthropic call
-    # (typically 5-15s) plus a primary+enrichment fetch (≤10s). 90s
-    # budget gives ~3x typical headroom.
     "analyze_paper": 90.0,
     "assist_draft": 180.0,
 }
@@ -237,6 +223,43 @@ def _score_to_summary(score: Any) -> CitationQualityScoreSummary:
     )
 
 
+
+
+def _maybe_progress_callback(
+    server: Server[Any, Any],
+) -> Callable[[int, int, str], Awaitable[None]] | None:
+    """Return a progress-notification callback bound to the active request.
+
+    MCP clients opt into progress reporting by passing a `progressToken`
+    in the request's `_meta`. If absent, we return None and the caller
+    runs silently. If present, we return a callable that emits one
+    `notifications/progress` message per call — Claude Desktop / other
+    MCP clients render these as a live progress indicator on the tool
+    call. Best-effort: a closed session or transport error swallows
+    silently so a notification failure can't break the tool itself.
+    """
+    try:
+        ctx = server.request_context
+    except LookupError:
+        return None
+    meta = getattr(ctx, "meta", None)
+    progress_token = getattr(meta, "progressToken", None)
+    if progress_token is None:
+        return None
+    session = ctx.session
+
+    async def _emit(progress: int, total: int, message: str) -> None:
+        try:
+            await session.send_progress_notification(
+                progress_token=progress_token,
+                progress=float(progress),
+                total=float(total),
+                message=message,
+            )
+        except Exception as exc:
+            _log.debug("progress notification failed (ignored): %s", exc)
+
+    return _emit
 
 
 async def _resolve_paper(paper_id: str, lookup: Callable[[str], Awaitable[Paper | None]]) -> Paper:
@@ -376,7 +399,6 @@ def build_server(
     library: LibraryService | None,
     embedder_label: str | None,
     reranker_label: str | None = None,
-    chunker: Chunker | None = None,
     claim_extractor: ClaimExtractor | None = None,
     citation_service: CitationService | None = None,
     analysis_service: AnalysisService | None = None,
@@ -389,6 +411,75 @@ def build_server(
     ingest_paper and library_search refuse.
     """
     server: Server[Any, Any] = Server("research-mcp", version=__version__)
+
+    # ---- MCP prompt: the one canonical entry point researchers want ----
+    # We ship a single prompt template rather than a wall of them. The
+    # research showed prompts are underused (~4% of public MCP servers
+    # ship any) and the high-impact one for this server is "review my
+    # draft for citation gaps" — bundles the right framing for
+    # assist_draft and gives Claude Desktop's prompt menu an obvious
+    # entry point a researcher will click before they'd type the tool
+    # call by hand.
+    @server.list_prompts()  # type: ignore[no-untyped-call,untyped-decorator]
+    async def list_prompts() -> list[mcp_types.Prompt]:
+        return [
+            mcp_types.Prompt(
+                name="review_draft_for_citations",
+                description=(
+                    "Review a draft paragraph for citation gaps. The model "
+                    "will extract claims, find candidate citations across "
+                    "all configured sources, and report ranked "
+                    "recommendations with reasoning."
+                ),
+                arguments=[
+                    mcp_types.PromptArgument(
+                        name="draft",
+                        description=(
+                            "The draft text to review. A paragraph or short "
+                            "section works best (under ~20K characters)."
+                        ),
+                        required=True,
+                    ),
+                ],
+            ),
+        ]
+
+    @server.get_prompt()  # type: ignore[no-untyped-call,untyped-decorator]
+    async def get_prompt(
+        name: str, arguments: dict[str, str] | None
+    ) -> mcp_types.GetPromptResult:
+        if name != "review_draft_for_citations":
+            raise ValueError(f"unknown prompt: {name}")
+        draft = (arguments or {}).get("draft", "")
+        if not draft.strip():
+            raise ValueError(
+                "review_draft_for_citations requires non-empty `draft`."
+            )
+        return mcp_types.GetPromptResult(
+            description=(
+                "Review the user's draft for citation gaps via the "
+                "research-mcp assist_draft pipeline."
+            ),
+            messages=[
+                mcp_types.PromptMessage(
+                    role="user",
+                    content=mcp_types.TextContent(
+                        type="text",
+                        text=(
+                            "Review the following draft for citation "
+                            "gaps. Call the `assist_draft` tool with the "
+                            "draft text below, then summarize the top "
+                            "recommendation for each detected claim "
+                            "(strong/moderate/weak verdict + the venue "
+                            "and key reasoning). If any claim has no "
+                            "strong candidate, say so explicitly rather "
+                            "than recommending a weak one.\n\n"
+                            f"Draft:\n{draft}"
+                        ),
+                    ),
+                ),
+            ],
+        )
 
     # mcp SDK ships its decorators as untyped at the moment.
     @server.list_tools()  # type: ignore[no-untyped-call,untyped-decorator]
@@ -407,10 +498,14 @@ def build_server(
             mcp_types.Tool(
                 name="ingest_paper",
                 description=(
-                    "Fetch a paper by canonical id and add it to the local "
-                    "FAISS-backed library so it can be recalled by similarity. "
-                    "Requires an embedder; see library_status if unsure whether "
-                    "the server is configured for ingest."
+                    "Add papers to the local FAISS-backed library so they "
+                    "can be recalled by similarity. Two modes: pass "
+                    "`paper_id` to ingest one specific paper, or pass "
+                    "`query` (with optional `max_papers`, `year_min`, "
+                    "`year_max`) to search all configured sources and "
+                    "bulk-ingest the top-N. Requires an embedder; see "
+                    "library_status if unsure whether the server is "
+                    "configured for ingest."
                 ),
                 inputSchema=IngestPaperInput.model_json_schema(),
             ),
@@ -463,18 +558,6 @@ def build_server(
                 inputSchema=FindPaperInput.model_json_schema(),
             ),
             mcp_types.Tool(
-                name="chunk_paper",
-                description=(
-                    "Section-aware chunking of a paper's text. Detects "
-                    "section headers (abstract / introduction / methodology "
-                    "/ etc) and yields one or more chunks per section. "
-                    "Useful for fine-grained recall after PDF text is "
-                    "ingested; for title+abstract-only papers, returns a "
-                    "single 'abstract' chunk."
-                ),
-                inputSchema=ChunkPaperInput.model_json_schema(),
-            ),
-            mcp_types.Tool(
                 name="extract_claims",
                 description=(
                     "Scan draft text and identify claims that need citations: "
@@ -501,16 +584,6 @@ def build_server(
                 inputSchema=FindCitationsInput.model_json_schema(),
             ),
             mcp_types.Tool(
-                name="score_citation",
-                description=(
-                    "Compute a citation-quality score for a paper the caller "
-                    "already has. Returns the 0-100 total plus per-dimension "
-                    "breakdown (venue / impact / author / recency) and any "
-                    "warnings (predatory venue, retracted, very recent)."
-                ),
-                inputSchema=ScoreCitationInput.model_json_schema(),
-            ),
-            mcp_types.Tool(
                 name="explain_citation",
                 description=(
                     "Produce a human-readable recommendation for citing a "
@@ -535,17 +608,6 @@ def build_server(
                 inputSchema=AnalyzePaperInput.model_json_schema(),
             ),
             mcp_types.Tool(
-                name="bulk_ingest",
-                description=(
-                    "Search across all configured sources and ingest the "
-                    "top-N results into the local library in one batched "
-                    "operation. Useful for quickly building a topic-focused "
-                    "corpus before semantic recall. Requires an embedder "
-                    "(see library_status)."
-                ),
-                inputSchema=BulkIngestInput.model_json_schema(),
-            ),
-            mcp_types.Tool(
                 name="assist_draft",
                 description=(
                     "End-to-end citation assistant: paste a draft paragraph, "
@@ -554,8 +616,10 @@ def build_server(
                     "across all configured sources (arXiv, Semantic Scholar, "
                     "PubMed, OpenAlex), scores each by venue + impact + "
                     "recency, and returns ranked recommendations with "
-                    "human-readable explanations. The killer demo of this "
-                    "server."
+                    "human-readable explanations. Streams progress "
+                    "notifications when the client supplies a "
+                    "progressToken — the LLM sees 'claim 3/8 done' "
+                    "messages as the pipeline runs."
                 ),
                 inputSchema=AssistDraftInput.model_json_schema(),
             ),
@@ -584,24 +648,47 @@ def build_server(
         if library is None:
             raise ValueError(f"ingest_paper unavailable: {_NO_EMBEDDER_HINT}")
         args = IngestPaperInput.model_validate(arguments)
-        # Step-level timing helps pinpoint hangs without logging payloads.
-        # Chaos test surfaced ingest_paper running past its budget without
-        # firing the timeout — these markers tell us whether we're stuck
-        # in fetch (network), embed (OpenAI), or the index upsert (FAISS).
+        # Step-level timing logs help diagnose hangs without logging
+        # payloads. Two modes share one tool: single-id (one paper) vs
+        # query (top-N from search + batched embed/upsert).
         t_start = time.monotonic()
-        paper = await library.ingest(args.paper_id)
+        partial_failures: list[str] = []
+        if args.paper_id is not None:
+            paper = await library.ingest(args.paper_id)
+            ingested: list[Paper] = [paper]
+        else:
+            assert args.query is not None  # enforced by IngestPaperInput validator
+            outcome = await search.search(
+                SearchQuery(
+                    text=args.query,
+                    max_results=args.max_papers,
+                    year_min=args.year_min,
+                    year_max=args.year_max,
+                )
+            )
+            partial_failures = list(outcome.partial_failures)
+            ingested = list(
+                await library.bulk_ingest([r.paper for r in outcome.results])
+            )
         t_after_ingest = time.monotonic()
         count = await library.count()
         t_after_count = time.monotonic()
         _log.info(
-            "ingest_paper id=%s ingest_ms=%.0f count_ms=%.0f",
-            args.paper_id,
+            "ingest_paper mode=%s n=%d ingest_ms=%.0f count_ms=%.0f",
+            "id" if args.paper_id else "query",
+            len(ingested),
             (t_after_ingest - t_start) * 1000,
             (t_after_count - t_after_ingest) * 1000,
         )
         return IngestPaperOutput(
-            paper=paper_to_summary(paper, source=source_from_id(paper.id, search.sources)),
+            ingested=[
+                paper_to_summary(
+                    p, source=source_from_id(p.id, search.sources)
+                )
+                for p in ingested
+            ],
             library_count=count,
+            partial_failures=partial_failures,
         ).model_dump()
 
     async def _do_recall(arguments: dict[str, Any]) -> dict[str, Any]:
@@ -680,44 +767,6 @@ def build_server(
             note=None,
         ).model_dump()
 
-    async def _do_chunk_paper(arguments: dict[str, Any]) -> dict[str, Any]:
-        if chunker is None:
-            raise ValueError(
-                "chunk_paper unavailable: no chunker configured"
-            )
-        args = ChunkPaperInput.model_validate(arguments)
-        try:
-            paper = await paper_lookup(args.paper_id)
-        except SourceUnavailable as exc:
-            raise ValueError(
-                f"could not resolve {args.paper_id!r}: "
-                f"{exc.source_name} is unavailable ({exc.short_reason()}). "
-                "This is usually transient — try again. Valid id prefixes: "
-                "'arxiv:1706.03762', 'doi:10.1038/...', 's2:abc123'."
-            ) from exc
-        if paper is None:
-            raise ValueError(
-                f"no configured source recognizes paper id {args.paper_id!r}. "
-                "Use a prefixed id like 'arxiv:1706.03762', 'doi:10.1038/...', "
-                "or 's2:abc123'."
-            )
-        chunks = await chunker.chunk(paper)
-        return ChunkPaperOutput(
-            chunks=[
-                TextChunkSummary(
-                    chunk_id=c.chunk_id,
-                    paper_id=c.paper_id,
-                    section=c.section,
-                    text=c.text,
-                    char_count=len(c.text),
-                    start_char=c.start_char,
-                    end_char=c.end_char,
-                )
-                for c in chunks
-            ],
-            chunker=chunker.name,
-        ).model_dump()
-
     async def _do_extract_claims(arguments: dict[str, Any]) -> dict[str, Any]:
         if claim_extractor is None:
             raise ValueError(
@@ -760,17 +809,6 @@ def build_server(
             scorer=citation_service.scorer.name,
         ).model_dump()
 
-    async def _do_score_citation(arguments: dict[str, Any]) -> dict[str, Any]:
-        if citation_service is None:
-            raise ValueError(_CITATION_UNAVAILABLE_HINT)
-        args = ScoreCitationInput.model_validate(arguments)
-        paper = await _resolve_paper(args.paper_id, paper_lookup)
-        score = await citation_service.score_citation(paper)
-        return ScoreCitationOutput(
-            paper=paper_to_summary(paper, source=source_from_id(paper.id, search.sources)),
-            score=_score_to_summary(score),
-        ).model_dump()
-
     async def _do_explain_citation(arguments: dict[str, Any]) -> dict[str, Any]:
         if citation_service is None:
             raise ValueError(_CITATION_UNAVAILABLE_HINT)
@@ -785,29 +823,6 @@ def build_server(
             paper=paper_to_summary(paper, source=source_from_id(paper.id, search.sources)),
         ).model_dump()
 
-    async def _do_bulk_ingest(arguments: dict[str, Any]) -> dict[str, Any]:
-        if library is None:
-            raise ValueError(f"bulk_ingest unavailable: {_NO_EMBEDDER_HINT}")
-        args = BulkIngestInput.model_validate(arguments)
-        outcome = await search.search(
-            SearchQuery(
-                text=args.query,
-                max_results=args.max_papers,
-                year_min=args.year_min,
-                year_max=args.year_max,
-            )
-        )
-        ingested = await library.bulk_ingest([r.paper for r in outcome.results])
-        return BulkIngestOutput(
-            ingested_count=len(ingested),
-            library_count=await library.count(),
-            papers=[
-                paper_to_summary(p, source=source_from_id(p.id, search.sources))
-                for p in ingested
-            ],
-            partial_failures=list(outcome.partial_failures),
-        ).model_dump()
-
     async def _do_assist_draft(arguments: dict[str, Any]) -> dict[str, Any]:
         if draft_service is None:
             raise ValueError(
@@ -816,8 +831,11 @@ def build_server(
                 "en_core_web_sm); a citation_service is wired by default."
             )
         args = AssistDraftInput.model_validate(arguments)
+        progress_cb = _maybe_progress_callback(server)
         recommendations = await draft_service.assist(
-            args.text, k_per_claim=args.k_per_claim
+            args.text,
+            k_per_claim=args.k_per_claim,
+            progress=progress_cb,
         )
         return AssistDraftOutput(
             recommendations=[
@@ -951,13 +969,10 @@ def build_server(
         "library_status": _do_status,
         "get_paper": _do_get_paper,
         "find_paper": _do_find_paper,
-        "chunk_paper": _do_chunk_paper,
         "extract_claims": _do_extract_claims,
         "find_citations": _do_find_citations,
-        "score_citation": _do_score_citation,
         "explain_citation": _do_explain_citation,
         "analyze_paper": _do_analyze_paper,
-        "bulk_ingest": _do_bulk_ingest,
         "assist_draft": _do_assist_draft,
     }
 
@@ -1048,8 +1063,11 @@ def _result_hint(tool_name: str, result: dict[str, Any]) -> str:
         return f"n={len(result['results'])}"
     if tool_name == "library_status":
         return f"count={result.get('count')}"
-    if "paper" in result and tool_name == "ingest_paper":
-        return f"library_count={result.get('library_count')}"
+    if tool_name == "ingest_paper":
+        return (
+            f"ingested={len(result.get('ingested', []))} "
+            f"library_count={result.get('library_count')}"
+        )
     if "paper" in result:
         return "paper=1"
     if "citation" in result:
@@ -1151,7 +1169,6 @@ async def run_default() -> None:
         library=library,
         embedder_label=label,
         reranker_label=reranker_label,
-        chunker=SectionAwareChunker(),
         claim_extractor=claim_extractor,
         citation_service=citation_svc,
         analysis_service=(
@@ -1215,7 +1232,6 @@ async def run_in_memory() -> None:
         paper_lookup=paper_lookup,
         library=library,
         embedder_label="fake:test-mode",
-        chunker=SectionAwareChunker(),
         claim_extractor=test_mode_extractor,
         citation_service=test_mode_citation,
         # run_in_memory ignores RESEARCH_MCP_ANALYSIS_MODEL on purpose;

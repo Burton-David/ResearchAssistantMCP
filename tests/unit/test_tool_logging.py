@@ -31,10 +31,21 @@ def test_result_hint_for_library_status() -> None:
     assert _result_hint("library_status", {"count": 0}) == "count=0"
 
 
-def test_result_hint_for_ingest() -> None:
+def test_result_hint_for_ingest_single() -> None:
+    """Single-paper ingest: `ingested` has one entry."""
     assert (
-        _result_hint("ingest_paper", {"paper": {}, "library_count": 7})
-        == "library_count=7"
+        _result_hint("ingest_paper", {"ingested": [{}], "library_count": 7})
+        == "ingested=1 library_count=7"
+    )
+
+
+def test_result_hint_for_ingest_query() -> None:
+    """Query-mode ingest: `ingested` carries the batch size."""
+    assert (
+        _result_hint(
+            "ingest_paper", {"ingested": [{}, {}, {}], "library_count": 10}
+        )
+        == "ingested=3 library_count=10"
     )
 
 

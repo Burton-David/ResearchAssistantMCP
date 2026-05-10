@@ -111,3 +111,54 @@ async def test_recommendation_carries_explanation_per_candidate() -> None:
         # A non-trivial sentence; substring check is loose to avoid
         # locking down exact phrasing.
         assert len(c.explanation) > 20
+
+
+# ---- progress callback ----
+
+
+async def test_assist_emits_progress_at_extraction_and_per_claim() -> None:
+    """The MCP layer wires a progress callback bound to the client's
+    progressToken; DraftService must invoke it at extraction start and
+    after each claim completes so the user sees live progress."""
+    svc = _service([_paper(citations=2000)])
+    events: list[tuple[int, int, str]] = []
+
+    async def progress(p: int, total: int, msg: str) -> None:
+        events.append((p, total, msg))
+
+    # Three sentences with digits → FakeClaimExtractor yields 3 claims.
+    text = "First with 10. Second with 20. Third with 30."
+    recs = await svc.assist(text, k_per_claim=1, progress=progress)
+    assert len(recs) == 3
+
+    # Expected: one start event, one "claims found" event, then one
+    # per-claim completion. Total stays len(claims) + 1.
+    assert events[0] == (0, 1, "extracting claims...")
+    assert events[1][0] == 1  # one step done after extraction
+    assert events[1][1] == 4  # 3 claims + 1 extraction step
+    assert len(events) == 5  # start + found + 3 per-claim
+
+
+async def test_assist_short_circuit_emits_zero_then_one_when_no_claims() -> None:
+    """Pure-description text → no claims. The user still needs progress
+    closure so the UI doesn't think the call is still running."""
+    svc = _service([_paper(citations=2000)])
+    events: list[tuple[int, int, str]] = []
+
+    async def progress(p: int, total: int, msg: str) -> None:
+        events.append((p, total, msg))
+
+    text = "No numbers here. Pure description."
+    recs = await svc.assist(text, k_per_claim=1, progress=progress)
+    assert recs == ()
+    # Two events: extraction-starting and no-claims-found closure.
+    assert events == [(0, 1, "extracting claims..."), (1, 1, "no claims found")]
+
+
+async def test_assist_no_progress_callback_runs_silently() -> None:
+    """When progress=None, behavior matches the pre-progress baseline
+    (no callback invocations, same return shape)."""
+    svc = _service([_paper(citations=2000)])
+    text = "First with 10. Second with 20."
+    recs = await svc.assist(text, k_per_claim=1, progress=None)
+    assert len(recs) == 2

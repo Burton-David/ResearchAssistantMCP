@@ -91,9 +91,121 @@ def test_year_min_accepts_real_int() -> None:
     assert parsed.year_min == 2018
 
 
-def test_ingest_paper_input_requires_id() -> None:
+def test_ingest_paper_input_requires_id_or_query() -> None:
+    """Either paper_id or query must be set — neither and we error."""
     with pytest.raises(ValidationError):
         IngestPaperInput.model_validate({})
+
+
+def test_ingest_paper_input_rejects_both_id_and_query() -> None:
+    """Exclusive modes — paper_id and query can't both be set."""
+    with pytest.raises(ValidationError):
+        IngestPaperInput.model_validate(
+            {"paper_id": "arxiv:1706.03762", "query": "transformers"}
+        )
+
+
+def test_ingest_paper_input_accepts_paper_id_only() -> None:
+    parsed = IngestPaperInput.model_validate({"paper_id": "arxiv:1706.03762"})
+    assert parsed.paper_id == "arxiv:1706.03762"
+    assert parsed.query is None
+
+
+def test_ingest_paper_input_accepts_query_only() -> None:
+    parsed = IngestPaperInput.model_validate(
+        {"query": "diffusion models", "max_papers": 5}
+    )
+    assert parsed.query == "diffusion models"
+    assert parsed.max_papers == 5
+    assert parsed.paper_id is None
+
+
+def test_ingest_paper_input_default_max_papers_when_query_given() -> None:
+    parsed = IngestPaperInput.model_validate({"query": "transformers"})
+    assert parsed.max_papers == 20  # documented default
+
+
+async def test_mcp_prompt_review_draft_renders_user_message() -> None:
+    """The server ships one MCP Prompt — `review_draft_for_citations` —
+    that bundles the right framing for assist_draft. Lock down the
+    rendering shape so a refactor can't silently drop the prompt or
+    change its argument contract."""
+    import mcp.types as mcp_types
+
+    from research_mcp.mcp.server import build_server
+    from research_mcp.service import DiscoveryService, SearchService
+    from tests.conftest import StaticSource
+
+    arxiv = StaticSource("arxiv", [])
+    search = SearchService([arxiv])
+    discovery = DiscoveryService(search)
+    server = build_server(
+        search=search,
+        discovery=discovery,
+        paper_lookup=lambda _id: None,  # type: ignore[arg-type,return-value]
+        library=None,
+        embedder_label=None,
+    )
+
+    list_handler = server.request_handlers[mcp_types.ListPromptsRequest]
+    list_response = await list_handler(
+        mcp_types.ListPromptsRequest(method="prompts/list", params=None)
+    )
+    prompts = list_response.root.prompts  # type: ignore[attr-defined]
+    assert len(prompts) == 1
+    assert prompts[0].name == "review_draft_for_citations"
+    assert prompts[0].arguments
+    assert prompts[0].arguments[0].name == "draft"
+    assert prompts[0].arguments[0].required is True
+
+    get_handler = server.request_handlers[mcp_types.GetPromptRequest]
+    response = await get_handler(
+        mcp_types.GetPromptRequest(
+            method="prompts/get",
+            params=mcp_types.GetPromptRequestParams(
+                name="review_draft_for_citations",
+                arguments={"draft": "Recent transformers outperform LSTMs."},
+            ),
+        )
+    )
+    result = response.root  # type: ignore[attr-defined]
+    assert len(result.messages) == 1
+    msg = result.messages[0]
+    assert msg.role == "user"
+    assert "assist_draft" in msg.content.text
+    assert "Recent transformers outperform LSTMs." in msg.content.text
+
+
+async def test_mcp_prompt_rejects_blank_draft() -> None:
+    """Empty draft is a misuse; surface it via ValueError so the MCP
+    SDK formats a clean error response instead of feeding empty text
+    into assist_draft."""
+    import mcp.types as mcp_types
+
+    from research_mcp.mcp.server import build_server
+    from research_mcp.service import DiscoveryService, SearchService
+    from tests.conftest import StaticSource
+
+    arxiv = StaticSource("arxiv", [])
+    search = SearchService([arxiv])
+    server = build_server(
+        search=search,
+        discovery=DiscoveryService(search),
+        paper_lookup=lambda _id: None,  # type: ignore[arg-type,return-value]
+        library=None,
+        embedder_label=None,
+    )
+    get_handler = server.request_handlers[mcp_types.GetPromptRequest]
+    with pytest.raises(ValueError, match="non-empty"):
+        await get_handler(
+            mcp_types.GetPromptRequest(
+                method="prompts/get",
+                params=mcp_types.GetPromptRequestParams(
+                    name="review_draft_for_citations",
+                    arguments={"draft": "   "},
+                ),
+            )
+        )
 
 
 def test_library_search_default_k() -> None:

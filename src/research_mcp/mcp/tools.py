@@ -63,11 +63,51 @@ class SearchPapersInput(_Strict):
 
 
 class IngestPaperInput(_Strict):
-    paper_id: str = Field(
-        ...,
+    """Single-paper OR bulk ingest in one tool.
+
+    Provide EITHER `paper_id` (single paper by canonical id) OR
+    `query` + optional `max_papers` (search and ingest the top-N).
+    The two modes used to be separate tools (`ingest_paper` and
+    `bulk_ingest`); collapsing them keeps the tool surface tight
+    without losing functionality.
+    """
+
+    paper_id: str | None = Field(
+        None,
         min_length=1,
-        description="Canonical paper id with source prefix, e.g. 'arxiv:1706.03762'.",
+        description=(
+            "Canonical paper id with source prefix (e.g. 'arxiv:1706.03762'). "
+            "Mutually exclusive with `query`."
+        ),
     )
+    query: str | None = Field(
+        None,
+        max_length=_MAX_QUERY_CHARS,
+        description=(
+            "Search query; the top `max_papers` results across all configured "
+            "sources are ingested. Mutually exclusive with `paper_id`."
+        ),
+    )
+    max_papers: int = Field(
+        20, ge=1, le=100,
+        description="Used only with `query`. Cap on how many papers to ingest.",
+    )
+    year_min: int | None = Field(
+        None, description="Earliest publication year (used only with `query`)."
+    )
+    year_max: int | None = Field(
+        None, description="Latest publication year (used only with `query`)."
+    )
+
+    @model_validator(mode="after")
+    def _exactly_one_mode(self) -> IngestPaperInput:
+        has_id = self.paper_id is not None
+        has_query = self.query is not None and bool(self.query.strip())
+        if has_id == has_query:  # both True or both False is invalid
+            raise ValueError(
+                "ingest_paper requires exactly one of `paper_id` or `query`."
+            )
+        return self
 
 
 class LibrarySearchInput(_Strict):
@@ -188,8 +228,12 @@ class LibrarySearchOutput(BaseModel):
 
 
 class IngestPaperOutput(BaseModel):
-    paper: PaperSummary
+    ingested: list[PaperSummary]
+    """The papers actually added to the index. For single-paper ingest,
+    a list of length 1. For query-mode ingest, up to `max_papers`."""
     library_count: int
+    partial_failures: list[str] = []
+    """Per-source transient failures, populated only in query-mode."""
 
 
 class CitePaperOutput(BaseModel):
@@ -247,34 +291,14 @@ class FindPaperOutput(BaseModel):
     """Per-source transient failures, same shape as SearchPapersOutput."""
 
 
-class ChunkPaperInput(_Strict):
-    paper_id: str = Field(
-        ...,
-        min_length=1,
-        description=(
-            "Canonical paper id with source prefix. The paper is fetched "
-            "from the originating source (no ingest required), then "
-            "section-aware chunking is applied to title + abstract "
-            "(+ full_text when present)."
-        ),
-    )
-
-
-class TextChunkSummary(BaseModel):
-    chunk_id: str
-    paper_id: str
-    section: str | None
-    text: str
-    char_count: int
-    start_char: int
-    end_char: int
-
-
-class ChunkPaperOutput(BaseModel):
-    chunks: list[TextChunkSummary]
-    chunker: str
-    """Active chunker name (e.g., 'section-aware', 'simple') so the LLM
-    caller knows which chunking semantics produced these chunks."""
+# chunk_paper was dropped from the public MCP tool surface during the
+# tool-count consolidation (15 → 12). The Chunker class and the
+# SectionAwareChunker implementation are still wired in build_server
+# because the analysis service uses them internally and a future
+# PDF-ingest path will. Library users can call them from the REPL:
+#
+#     from research_mcp.chunker import SectionAwareChunker
+#     chunks = await SectionAwareChunker().chunk(paper)
 
 
 # ---- extract_claims ----
@@ -379,12 +403,10 @@ class FindCitationsInput(_Strict):
     )
 
 
-class ScoreCitationInput(_Strict):
-    paper_id: str = Field(
-        ...,
-        min_length=1,
-        description="Canonical paper id (e.g. 'arxiv:1706.03762').",
-    )
+# score_citation was dropped from the public tool surface during
+# consolidation. `explain_citation` already returns the full
+# `CitationQualityScoreSummary` inside its output — users who want
+# only the score can call explain_citation and read the .score field.
 
 
 class ExplainCitationInput(_Strict):
@@ -419,11 +441,6 @@ class FindCitationsOutput(BaseModel):
     candidates: list[CitationCandidateSummary]
     scorer: str
     """Active scorer name ('heuristic' / 'fake' / future LLM scorer)."""
-
-
-class ScoreCitationOutput(BaseModel):
-    paper: PaperSummary
-    score: CitationQualityScoreSummary
 
 
 class ExplainCitationOutput(BaseModel):
@@ -484,29 +501,9 @@ class AnalyzePaperOutput(BaseModel):
     analysis: PaperAnalysisSummary
 
 
-# ---- bulk_ingest ----
-
-
-class BulkIngestInput(_Strict):
-    query: NonBlankStr = Field(..., description="Search query.")
-    max_papers: int = Field(
-        20, ge=1, le=100,
-        description="Cap on how many papers to ingest from the search results.",
-    )
-    year_min: int | None = Field(None, description="Earliest publication year.")
-    year_max: int | None = Field(None, description="Latest publication year.")
-
-    @field_validator("query")
-    @classmethod
-    def _query_not_blank(cls, value: str) -> str:
-        return _reject_blank(value)
-
-
-class BulkIngestOutput(BaseModel):
-    ingested_count: int
-    library_count: int
-    papers: list[PaperSummary]
-    partial_failures: list[str] = []
+# bulk_ingest is folded into `ingest_paper` (provide `query` instead of
+# `paper_id` for bulk mode). The IngestPaperInput model above carries
+# the merged schema.
 
 
 # ---- assist_draft ----
