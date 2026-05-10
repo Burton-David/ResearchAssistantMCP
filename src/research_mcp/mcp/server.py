@@ -95,7 +95,7 @@ from research_mcp.service import DiscoveryService, LibraryService, SearchService
 from research_mcp.service.analysis import AnalysisService
 from research_mcp.service.citation import CitationService
 from research_mcp.service.draft import DraftService
-from research_mcp.service.library import fetch_from_sources
+from research_mcp.service.library import fetch_with_enrichment
 from research_mcp.sources import (
     ArxivSource,
     OpenAlexSource,
@@ -121,14 +121,19 @@ _TOOL_TIMEOUTS: Final[dict[str, float]] = {
     "get_paper": 60.0,
     "library_status": 10.0,
     "library_search": 60.0,
-    "ingest_paper": 90.0,
+    # Tightened from 90s. Realistic ingest is fetch (1-3s) + embed (1-2s)
+    # + faiss upsert (<1s). 60s budget catches a wedged upstream early.
+    "ingest_paper": 60.0,
     "bulk_ingest": 180.0,
     "chunk_paper": 60.0,
     "extract_claims": 90.0,
     "find_citations": 150.0,
     "score_citation": 60.0,
     "explain_citation": 60.0,
-    "analyze_paper": 150.0,
+    # Tightened from 150s. analyze_paper is one OpenAI/Anthropic call
+    # (typically 5-15s) plus a primary+enrichment fetch (≤10s). 90s
+    # budget gives ~3x typical headroom.
+    "analyze_paper": 90.0,
     "assist_draft": 180.0,
 }
 
@@ -578,10 +583,24 @@ def build_server(
         if library is None:
             raise ValueError(f"ingest_paper unavailable: {_NO_EMBEDDER_HINT}")
         args = IngestPaperInput.model_validate(arguments)
+        # Step-level timing helps pinpoint hangs without logging payloads.
+        # Chaos test surfaced ingest_paper running past its budget without
+        # firing the timeout — these markers tell us whether we're stuck
+        # in fetch (network), embed (OpenAI), or the index upsert (FAISS).
+        t_start = time.monotonic()
         paper = await library.ingest(args.paper_id)
+        t_after_ingest = time.monotonic()
+        count = await library.count()
+        t_after_count = time.monotonic()
+        _log.info(
+            "ingest_paper id=%s ingest_ms=%.0f count_ms=%.0f",
+            args.paper_id,
+            (t_after_ingest - t_start) * 1000,
+            (t_after_count - t_after_ingest) * 1000,
+        )
         return IngestPaperOutput(
             paper=paper_to_summary(paper, source=source_from_id(paper.id, search.sources)),
-            library_count=await library.count(),
+            library_count=count,
         ).model_dump()
 
     async def _do_recall(arguments: dict[str, Any]) -> dict[str, Any]:
@@ -842,9 +861,22 @@ def build_server(
                 "ANTHROPIC_API_KEY)."
             )
         args = AnalyzePaperInput.model_validate(arguments)
+        # Same diagnostic motivation as ingest_paper: split the work
+        # into measurable phases (paper resolution vs LLM call) so a
+        # next-time hang shows which step is responsible.
+        t_start = time.monotonic()
         paper = await _resolve_paper(args.paper_id, paper_lookup)
+        t_after_resolve = time.monotonic()
         kinds = tuple(AnalysisKind(k) for k in args.kinds)
         analysis = await analysis_service.analyze(paper, kinds)
+        t_after_analyze = time.monotonic()
+        _log.info(
+            "analyze_paper id=%s resolve_ms=%.0f analyze_ms=%.0f model=%s",
+            args.paper_id,
+            (t_after_resolve - t_start) * 1000,
+            (t_after_analyze - t_after_resolve) * 1000,
+            analysis.model,
+        )
         return AnalyzePaperOutput(
             paper=paper_to_summary(paper, source=source_from_id(paper.id, search.sources)),
             analysis=PaperAnalysisSummary(
@@ -1095,7 +1127,13 @@ async def run_default() -> None:
         _log.warning("no embedder configured: %s", _NO_EMBEDDER_HINT)
 
     async def paper_lookup(paper_id: str) -> Paper | None:
-        return await fetch_from_sources(sources, paper_id)
+        # fetch_with_enrichment runs the primary fetch via fetch_from_sources
+        # and then fans out best-effort metadata enrichment across the
+        # other configured sources, bounded by an 8s deadline. This is
+        # what fixes Vaswani-via-arxiv getting 35/100: arxiv has no
+        # citation_count or peer-reviewed venue; S2 does. After the fan-out
+        # the merged record carries both.
+        return await fetch_with_enrichment(sources, paper_id)
 
     paper_analyzer = _select_paper_analyzer()
     claim_extractor = _select_claim_extractor()
@@ -1158,7 +1196,13 @@ async def run_in_memory() -> None:
     # weights every test run.
 
     async def paper_lookup(paper_id: str) -> Paper | None:
-        return await fetch_from_sources(sources, paper_id)
+        # fetch_with_enrichment runs the primary fetch via fetch_from_sources
+        # and then fans out best-effort metadata enrichment across the
+        # other configured sources, bounded by an 8s deadline. This is
+        # what fixes Vaswani-via-arxiv getting 35/100: arxiv has no
+        # citation_count or peer-reviewed venue; S2 does. After the fan-out
+        # the merged record carries both.
+        return await fetch_with_enrichment(sources, paper_id)
 
     test_mode_extractor = _select_claim_extractor()
     test_mode_citation = CitationService(

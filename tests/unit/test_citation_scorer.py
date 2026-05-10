@@ -128,6 +128,51 @@ async def test_acronym_match_does_not_fire_inside_longer_words() -> None:
     assert nope.venue < 25.0
 
 
+async def test_warns_when_citation_count_missing() -> None:
+    """The chaos test caught Vaswani scoring 35/100 because its arxiv-only
+    record had no citation_count. Without a warning, the user couldn't
+    tell whether the score reflected a poor citation or missing data."""
+    scorer = HeuristicCitationScorer(now=date(2026, 5, 10))
+    result = await scorer.score(
+        _paper(venue="NeurIPS", year=2017, citation_count=None)
+    )
+    assert any(
+        "missing metadata" in w.lower() and "citation count" in w.lower()
+        for w in result.warnings
+    )
+
+
+async def test_warns_when_venue_missing() -> None:
+    scorer = HeuristicCitationScorer(now=date(2026, 5, 10))
+    result = await scorer.score(_paper(venue=None, year=2017, citation_count=10000))
+    assert any(
+        "missing metadata" in w.lower() and "venue" in w.lower()
+        for w in result.warnings
+    )
+
+
+async def test_warns_about_both_when_both_missing() -> None:
+    """The arxiv-only-record case: no citation_count AND no venue. One
+    consolidated warning, both fields named."""
+    scorer = HeuristicCitationScorer(now=date(2026, 5, 10))
+    result = await scorer.score(_paper(venue=None, year=2017, citation_count=None))
+    metadata_warnings = [w for w in result.warnings if "missing metadata" in w.lower()]
+    assert metadata_warnings
+    msg = metadata_warnings[0]
+    assert "citation count" in msg.lower()
+    assert "venue" in msg.lower()
+
+
+async def test_no_metadata_warning_when_fully_enriched() -> None:
+    """A fully-enriched paper (venue + citation_count + year) should not
+    raise the missing-metadata warning."""
+    scorer = HeuristicCitationScorer(now=date(2026, 5, 10))
+    result = await scorer.score(
+        _paper(venue="NeurIPS", year=2017, citation_count=70000)
+    )
+    assert not any("missing metadata" in w.lower() for w in result.warnings)
+
+
 # ---- impact / citation count ----
 
 

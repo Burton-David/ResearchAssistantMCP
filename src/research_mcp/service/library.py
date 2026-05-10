@@ -17,6 +17,7 @@ the bi-encoder cosine ordering with a logged warning.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import Sequence
 
@@ -26,6 +27,7 @@ from research_mcp.domain.paper import Paper
 from research_mcp.domain.reranker import Reranker
 from research_mcp.domain.source import Source
 from research_mcp.errors import SourceUnavailable
+from research_mcp.service.search import _merge_records
 
 _log = logging.getLogger(__name__)
 
@@ -58,6 +60,104 @@ async def fetch_from_sources(
     if first_unavailable is not None:
         raise first_unavailable
     return None
+
+
+# Hard ceiling on how long enrichment is allowed to take after the
+# primary fetch. Enrichment is best-effort metadata augmentation; we
+# never let a slow S2 / OpenAlex add to the user-visible latency
+# beyond this. Tuned to "fits inside a 60s tool budget with the
+# primary fetch + LLM call also taking time."
+_ENRICHMENT_DEADLINE_SECONDS = 8.0
+
+
+async def fetch_with_enrichment(
+    sources: Sequence[Source], paper_id: str
+) -> Paper | None:
+    """Like `fetch_from_sources`, but cross-source enriches after primary.
+
+    Why: when a user asks `score_citation paper_id="arxiv:1706.03762"`,
+    only `ArxivSource` claims the prefix in fetch_from_sources order.
+    arXiv's API doesn't return citation count or peer-reviewed venue,
+    so the heuristic scorer sees a Vaswani-shaped record with
+    `citation_count=None, venue=None` and rates it 35/100 — lower than
+    a 0-citation 2026 paper. The fix is to query the OTHER sources
+    (S2 for citation count + venue, OpenAlex for DOI/topics) after
+    primary fetch and merge what comes back. Each source is asked
+    using whichever id form it accepts (s2: / doi: / arxiv:), bounded
+    by an 8-second total deadline so a slow upstream can't hijack a
+    tool call. Best-effort: misses just leave the field unset.
+    """
+    # Find primary by walking sources in order. Identical semantics to
+    # `fetch_from_sources` but we capture which source produced the hit
+    # so we can exclude it from the enrichment fan-out (saves an API
+    # call and avoids a degenerate self-merge).
+    primary: Paper | None = None
+    primary_source: Source | None = None
+    first_unavailable: SourceUnavailable | None = None
+    for source in sources:
+        try:
+            result = await source.fetch(paper_id)
+        except SourceUnavailable as exc:
+            if first_unavailable is None:
+                first_unavailable = exc
+            continue
+        if result is not None:
+            primary = result
+            primary_source = source
+            break
+    if primary is None:
+        if first_unavailable is not None:
+            raise first_unavailable
+        return None
+
+    # Build candidate id forms from the primary record. We'll try each
+    # source against every candidate whose prefix it claims.
+    candidates: list[str] = [primary.id]
+    if primary.doi:
+        candidates.append(f"doi:{primary.doi}")
+    if primary.arxiv_id:
+        candidates.append(f"arxiv:{primary.arxiv_id}")
+    if primary.semantic_scholar_id:
+        candidates.append(f"s2:{primary.semantic_scholar_id}")
+
+    async def _enrich_via(source: Source) -> Paper | None:
+        # Skip the source that already produced the primary — its disk
+        # cache would just re-return the same record, and the merge
+        # would be a no-op anyway.
+        if source is primary_source:
+            return None
+        for cand in candidates:
+            prefix = cand.split(":", 1)[0]
+            if prefix not in source.id_prefixes:
+                continue
+            try:
+                return await source.fetch(cand)
+            except SourceUnavailable:
+                # Best-effort enrichment: a flaky upstream just yields no
+                # extra metadata, never an error to the user.
+                return None
+        return None
+
+    try:
+        results = await asyncio.wait_for(
+            asyncio.gather(
+                *(_enrich_via(s) for s in sources),
+                return_exceptions=True,
+            ),
+            timeout=_ENRICHMENT_DEADLINE_SECONDS,
+        )
+    except TimeoutError:
+        _log.info(
+            "enrichment hit deadline after %.1fs; returning primary record",
+            _ENRICHMENT_DEADLINE_SECONDS,
+        )
+        return primary
+
+    enriched = primary
+    for r in results:
+        if isinstance(r, Paper) and r.id != primary.id:
+            enriched = _merge_records(enriched, r)
+    return enriched
 
 
 class PaperNotFoundError(LookupError):

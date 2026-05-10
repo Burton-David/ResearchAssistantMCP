@@ -45,7 +45,14 @@ class SemanticScholarSource:
     """A `Source` that fronts the Semantic Scholar Graph API."""
 
     name: str = "semantic_scholar"
-    id_prefixes: tuple[str, ...] = ("s2", "doi")
+    # arxiv: is included so cross-source enrichment can reach S2 with an
+    # arxiv-id-only paper (e.g., a Vaswani lookup via arxiv:1706.03762
+    # gets the canonical NeurIPS venue + citation_count from S2). S2's
+    # /paper/<id> endpoint accepts arXiv:NNNN.NNNNN natively; the guard
+    # was the only thing blocking it. Wiring-layer order keeps arxiv
+    # itself listed first, so arxiv-prefixed user fetches still hit
+    # ArxivSource — S2 only contributes during enrichment fan-out.
+    id_prefixes: tuple[str, ...] = ("s2", "doi", "arxiv")
 
     def __init__(
         self,

@@ -321,3 +321,124 @@ async def test_bulk_ingest_empty_input_is_noop() -> None:
     )
     assert await library.bulk_ingest([]) == ()
     assert await library.count() == 0
+
+
+async def test_fetch_with_enrichment_merges_metadata_across_sources() -> None:
+    """The chaos-test fix: when only arxiv claims `arxiv:1706.03762`, S2
+    should still get queried for venue + citation_count and merged into
+    the primary record. Without enrichment, score_citation starves on
+    missing metadata and Vaswani gets 35/100."""
+    from datetime import date as _date
+
+    from research_mcp.service.library import fetch_with_enrichment
+
+    arxiv_record = Paper(
+        id="arxiv:1706.03762",
+        title="Attention Is All You Need",
+        abstract="...",
+        authors=(Author("Vaswani"),),
+        published=_date(2017, 6, 12),
+        arxiv_id="1706.03762",
+        # Notice: no venue, no citation_count — same as a real arxiv response.
+    )
+    s2_record = Paper(
+        id="s2:abc123",
+        title="Attention Is All You Need",
+        abstract="...",
+        authors=(Author("Vaswani"),),
+        published=_date(2017, 6, 12),
+        arxiv_id="1706.03762",
+        venue="NeurIPS",
+        citation_count=70000,
+    )
+
+    class _ArxivFake:
+        name = "arxiv"
+        id_prefixes = ("arxiv",)
+
+        async def search(self, query):  # type: ignore[no-untyped-def]
+            return []
+
+        async def fetch(self, paper_id: str) -> Paper | None:
+            return arxiv_record if paper_id == "arxiv:1706.03762" else None
+
+    class _S2Fake:
+        # Mirrors the production widening: S2 now claims arxiv: too so
+        # cross-source enrichment can reach it.
+        name = "semantic_scholar"
+        id_prefixes = ("s2", "doi", "arxiv")
+
+        async def search(self, query):  # type: ignore[no-untyped-def]
+            return []
+
+        async def fetch(self, paper_id: str) -> Paper | None:
+            if paper_id in {"arxiv:1706.03762", "s2:abc123"}:
+                return s2_record
+            return None
+
+    enriched = await fetch_with_enrichment(
+        [_ArxivFake(), _S2Fake()], "arxiv:1706.03762"  # type: ignore[list-item]
+    )
+    assert enriched is not None
+    # Enrichment populated the missing fields.
+    assert enriched.venue == "NeurIPS"
+    assert enriched.citation_count == 70000
+
+
+async def test_fetch_with_enrichment_returns_primary_when_no_other_source_matches() -> None:
+    """If no other source can resolve the paper, return the primary unchanged."""
+    from datetime import date as _date
+
+    from research_mcp.service.library import fetch_with_enrichment
+
+    primary = Paper(
+        id="arxiv:1706.03762",
+        title="x",
+        abstract="",
+        authors=(Author("A"),),
+        published=_date(2017, 1, 1),
+        arxiv_id="1706.03762",
+    )
+
+    class _ArxivFake:
+        name = "arxiv"
+        id_prefixes = ("arxiv",)
+
+        async def search(self, query):  # type: ignore[no-untyped-def]
+            return []
+
+        async def fetch(self, paper_id: str) -> Paper | None:
+            return primary if paper_id == "arxiv:1706.03762" else None
+
+    class _NoMatch:
+        name = "nomatch"
+        id_prefixes = ("xyz",)
+
+        async def search(self, query):  # type: ignore[no-untyped-def]
+            return []
+
+        async def fetch(self, paper_id: str) -> Paper | None:
+            return None
+
+    enriched = await fetch_with_enrichment(
+        [_ArxivFake(), _NoMatch()], "arxiv:1706.03762"  # type: ignore[list-item]
+    )
+    assert enriched == primary
+
+
+async def test_fetch_with_enrichment_returns_none_when_primary_missing() -> None:
+    from research_mcp.service.library import fetch_with_enrichment
+
+    class _NoneSource:
+        name = "x"
+        id_prefixes = ("x",)
+
+        async def search(self, query):  # type: ignore[no-untyped-def]
+            return []
+
+        async def fetch(self, paper_id: str) -> Paper | None:
+            return None
+
+    assert await fetch_with_enrichment(
+        [_NoneSource()], "arxiv:9"  # type: ignore[list-item]
+    ) is None

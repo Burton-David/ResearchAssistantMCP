@@ -151,11 +151,17 @@ def test_source_from_id_routes_via_id_prefixes() -> None:
 
 
 def test_source_id_prefixes_are_correct_on_real_adapters() -> None:
-    """Lock down the prefix declarations on the live adapters."""
+    """Lock down the prefix declarations on the live adapters.
+
+    S2 claims `arxiv` too as of the cross-source-enrichment fix —
+    the wiring layer keeps ArxivSource listed first so user-facing
+    `arxiv:` fetches still hit ArxivSource first; S2 only contributes
+    via the parallel enrichment fan-out.
+    """
     from research_mcp.sources import ArxivSource, SemanticScholarSource
 
     assert ArxivSource.id_prefixes == ("arxiv",)
-    assert SemanticScholarSource.id_prefixes == ("s2", "doi")
+    assert SemanticScholarSource.id_prefixes == ("s2", "doi", "arxiv")
 
 
 def test_short_reason_extracts_http_status_code() -> None:
@@ -228,10 +234,16 @@ def test_select_reranker_handles_env(monkeypatch: pytest.MonkeyPatch) -> None:
         _select_reranker()
 
 
-def test_semantic_scholar_fetch_returns_none_for_arxiv_prefix() -> None:
-    """Honor id_prefixes: S2 declares ('s2', 'doi'); fetch must return None
-    for an arxiv-prefixed id rather than burning an API call. This was the
-    root cause of cite_paper for a typo'd arxiv id surfacing an S2 429."""
+def test_semantic_scholar_fetch_returns_none_for_unowned_prefix() -> None:
+    """Honor id_prefixes: S2 declares ('s2', 'doi', 'arxiv'); fetch must
+    return None for any other prefix rather than burning an API call.
+    Using `pmid:` here — that's owned by PubMed, not S2.
+
+    Historical note: this test originally used `arxiv:` because S2 used
+    to refuse the prefix. The cross-source enrichment fix widened S2 to
+    also claim arxiv:, so we reach for an actually-unowned prefix to
+    keep the spirit of the test (don't waste an API call on someone
+    else's id)."""
     import asyncio
 
     from research_mcp.sources import SemanticScholarSource
@@ -239,7 +251,7 @@ def test_semantic_scholar_fetch_returns_none_for_arxiv_prefix() -> None:
     s2 = SemanticScholarSource()
 
     async def run() -> None:
-        result = await s2.fetch("arxiv:9999.99999")
+        result = await s2.fetch("pmid:12345678")
         assert result is None
         await s2.aclose()
 

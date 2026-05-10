@@ -107,6 +107,23 @@ class HeuristicCitationScorer:
         author, author_factor = _score_author(paper)
         recency, recency_factor = _score_recency(paper, self._now)
 
+        # Surface a warning when KEY metadata is missing so the user
+        # knows the score is uncertain rather than silently low. The
+        # chaos test caught Vaswani scoring 35/100 because arxiv-only
+        # records lack citation_count + venue; without this warning,
+        # the user can't tell that the score reflects missing data
+        # rather than a poor citation.
+        missing = []
+        if paper.citation_count is None:
+            missing.append("citation count")
+        if not paper.venue:
+            missing.append("venue")
+        if missing:
+            warnings.append(
+                f"score reflects missing metadata: {', '.join(missing)} "
+                "unavailable; cross-source enrichment may not have resolved"
+            )
+
         residual = _RESIDUAL_MAX * 0.5  # neutral mid-band; weighted average rounds to 100
         total = venue + impact + author + recency + residual
 
