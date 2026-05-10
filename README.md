@@ -45,8 +45,8 @@ Fourteen MCP tools the LLM calls directly, organized by stage of the research wo
 ## Quick start
 
 ```bash
-git clone https://github.com/burton-david/research-mcp
-cd research-mcp
+git clone https://github.com/Burton-David/ResearchAssistantMCP
+cd ResearchAssistantMCP
 uv sync                                    # or: pip install -e ".[dev]"
 
 # Citation extraction (spaCy + en_core_web_sm) is required for assist_draft

@@ -5,8 +5,8 @@ Thanks for your interest in `research-mcp`. This document explains how to set up
 ## Setup
 
 ```bash
-git clone https://github.com/burton-david/research-mcp
-cd research-mcp
+git clone https://github.com/Burton-David/ResearchAssistantMCP
+cd ResearchAssistantMCP
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -e ".[dev]"

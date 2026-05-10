@@ -59,9 +59,9 @@ paper-analysis = ["anthropic>=0.40"]
 research-mcp = "research_mcp.cli:main"
 
 [project.urls]
-Homepage = "https://github.com/burton-david/research-mcp"
-Repository = "https://github.com/burton-david/research-mcp"
-Issues = "https://github.com/burton-david/research-mcp/issues"
+Homepage = "https://github.com/Burton-David/ResearchAssistantMCP"
+Repository = "https://github.com/Burton-David/ResearchAssistantMCP"
+Issues = "https://github.com/Burton-David/ResearchAssistantMCP/issues"
 
 [build-system]
 requires = ["hatchling"]
