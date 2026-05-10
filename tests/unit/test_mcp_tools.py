@@ -103,6 +103,24 @@ def test_paper_to_summary_handles_minimal_paper(vaswani_paper) -> None:  # type:
     assert summary.id == vaswani_paper.id
     assert summary.year == 2017
     assert summary.authors[0] == "Ashish Vaswani"
+    assert summary.authors_truncated is False
+    assert summary.authors_total == 8
+
+
+def test_paper_to_summary_truncates_huge_author_list() -> None:
+    """A 600-author HEP paper should not blow the LLM's context."""
+    from research_mcp.domain.paper import Author, Paper
+
+    big = Paper(
+        id="x:1",
+        title="t",
+        abstract="a",
+        authors=tuple(Author(f"Author {i}") for i in range(600)),
+    )
+    summary = paper_to_summary(big)
+    assert len(summary.authors) == 20
+    assert summary.authors_truncated is True
+    assert summary.authors_total == 600
 
 
 def test_library_status_input_takes_no_args() -> None:

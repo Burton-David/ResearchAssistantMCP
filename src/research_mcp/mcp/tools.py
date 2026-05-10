@@ -94,11 +94,20 @@ class LibraryStatusInput(_Strict):
     """No arguments. Reports library size without requiring an ingest call."""
 
 
+# Past this many authors, large-collaboration HEP/ML papers (BESIII, ATLAS,
+# CMS, …) blow tens of KB of context for one search result. We truncate
+# explicitly with a `+ N more` count so the LLM still knows the full
+# authorship is larger than what it sees.
+_MAX_AUTHORS_IN_SUMMARY = 20
+
+
 class PaperSummary(BaseModel):
     id: str
     title: str
     abstract: str
     authors: list[str]
+    authors_truncated: bool = False
+    authors_total: int = 0
     year: int | None
     venue: str | None
     url: str | None
@@ -129,11 +138,15 @@ class LibraryStatusOutput(BaseModel):
 
 
 def paper_to_summary(paper: Paper) -> PaperSummary:
+    all_authors = [a.name for a in paper.authors]
+    truncated = len(all_authors) > _MAX_AUTHORS_IN_SUMMARY
     return PaperSummary(
         id=paper.id,
         title=paper.title,
         abstract=paper.abstract,
-        authors=[a.name for a in paper.authors],
+        authors=all_authors[:_MAX_AUTHORS_IN_SUMMARY],
+        authors_truncated=truncated,
+        authors_total=len(all_authors),
         year=paper.published.year if paper.published else None,
         venue=paper.venue,
         url=paper.url,
