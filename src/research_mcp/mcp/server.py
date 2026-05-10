@@ -29,6 +29,7 @@ from research_mcp.mcp.tools import (
     CitePaperOutput,
     IngestPaperInput,
     IngestPaperOutput,
+    LibrarySearchHit,
     LibrarySearchInput,
     LibrarySearchOutput,
     LibraryStatusInput,
@@ -127,7 +128,10 @@ def build_server(
         args = LibrarySearchInput.model_validate(arguments)
         results = await library.recall(args.query, k=args.k)
         return LibrarySearchOutput(
-            results=[(paper_to_summary(p), score) for p, score in results]
+            results=[
+                LibrarySearchHit(paper=paper_to_summary(p), score=score)
+                for p, score in results
+            ]
         ).model_dump()
 
     async def _do_cite(arguments: dict[str, Any]) -> dict[str, Any]:

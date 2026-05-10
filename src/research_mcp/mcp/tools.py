@@ -119,8 +119,20 @@ class SearchPapersOutput(BaseModel):
     results: list[PaperSummary]
 
 
+class LibrarySearchHit(BaseModel):
+    """One ranked recall result.
+
+    `score` is cosine similarity in [-1, 1]; for OpenAI text-embedding-3-*
+    on a normalized FAISS index, in-domain hits typically score 0.4-0.8 and
+    near-duplicates score >0.9.
+    """
+
+    paper: PaperSummary
+    score: float
+
+
 class LibrarySearchOutput(BaseModel):
-    results: list[tuple[PaperSummary, float]]
+    results: list[LibrarySearchHit]
 
 
 class IngestPaperOutput(BaseModel):
