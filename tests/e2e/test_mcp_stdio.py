@@ -34,7 +34,14 @@ async def test_search_papers_round_trip() -> None:
         await session.initialize()
         tools = await session.list_tools()
         tool_names = {t.name for t in tools.tools}
-        assert {"search_papers", "ingest_paper", "library_search", "cite_paper"} <= tool_names
+        assert {
+            "search_papers",
+            "ingest_paper",
+            "library_search",
+            "cite_paper",
+            "library_status",
+            "get_paper",
+        } <= tool_names
 
         result = await session.call_tool(
             "search_papers",

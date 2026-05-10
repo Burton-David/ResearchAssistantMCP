@@ -135,3 +135,17 @@ def test_library_status_input_rejects_unknown_field() -> None:
 
     with pytest.raises(ValidationError):
         LibraryStatusInput.model_validate({"unexpected": "x"})
+
+
+def test_get_paper_input_requires_id() -> None:
+    from research_mcp.mcp.tools import GetPaperInput
+
+    with pytest.raises(ValidationError):
+        GetPaperInput.model_validate({})
+
+
+def test_get_paper_input_rejects_blank_id() -> None:
+    from research_mcp.mcp.tools import GetPaperInput
+
+    with pytest.raises(ValidationError):
+        GetPaperInput.model_validate({"paper_id": ""})

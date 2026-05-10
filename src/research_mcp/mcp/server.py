@@ -28,6 +28,8 @@ from research_mcp.index import FaissIndex, MemoryIndex
 from research_mcp.mcp.tools import (
     CitePaperInput,
     CitePaperOutput,
+    GetPaperInput,
+    GetPaperOutput,
     IngestPaperInput,
     IngestPaperOutput,
     LibrarySearchHit,
@@ -101,6 +103,15 @@ def build_server(
                 ),
                 inputSchema=LibraryStatusInput.model_json_schema(),
             ),
+            mcp_types.Tool(
+                name="get_paper",
+                description=(
+                    "Fetch full Paper metadata for an id without ingesting. "
+                    "Useful as a preview step before deciding whether to "
+                    "commit to embedding the paper into the local library."
+                ),
+                inputSchema=GetPaperInput.model_json_schema(),
+            ),
         ]
 
     async def _do_search(arguments: dict[str, Any]) -> dict[str, Any]:
@@ -160,12 +171,30 @@ def build_server(
         LibraryStatusInput.model_validate(arguments)
         return LibraryStatusOutput(count=await library.count()).model_dump()
 
+    async def _do_get_paper(arguments: dict[str, Any]) -> dict[str, Any]:
+        args = GetPaperInput.model_validate(arguments)
+        try:
+            paper = await paper_lookup(args.paper_id)
+        except SourceUnavailable as exc:
+            raise ValueError(
+                f"could not resolve {args.paper_id!r}: source {exc.source_name!r} "
+                f"is unavailable ({exc.reason}). This is usually transient — try again."
+            ) from exc
+        if paper is None:
+            raise ValueError(
+                f"no configured source recognizes paper id {args.paper_id!r}. "
+                "Use a prefixed id like 'arxiv:1706.03762', 'doi:10.1038/...', "
+                "or 's2:abc123'."
+            )
+        return GetPaperOutput(paper=paper_to_summary(paper)).model_dump()
+
     handlers: dict[str, Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]] = {
         "search_papers": _do_search,
         "ingest_paper": _do_ingest,
         "library_search": _do_recall,
         "cite_paper": _do_cite,
         "library_status": _do_status,
+        "get_paper": _do_get_paper,
     }
 
     # validate_input=False bypasses the mcp SDK's strict jsonschema check so

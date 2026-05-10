@@ -94,6 +94,19 @@ class LibraryStatusInput(_Strict):
     """No arguments. Reports library size without requiring an ingest call."""
 
 
+class GetPaperInput(_Strict):
+    paper_id: str = Field(
+        ...,
+        min_length=1,
+        description=(
+            "Canonical paper id with source prefix (e.g. 'arxiv:1706.03762', "
+            "'doi:10.1038/...', 's2:abc...'). Returns full Paper metadata "
+            "without ingesting; use ingest_paper if you want it in the "
+            "local library."
+        ),
+    )
+
+
 # Past this many authors, large-collaboration HEP/ML papers (BESIII, ATLAS,
 # CMS, …) blow tens of KB of context for one search result. We truncate
 # explicitly with a `+ N more` count so the LLM still knows the full
@@ -147,6 +160,10 @@ class CitePaperOutput(BaseModel):
 
 class LibraryStatusOutput(BaseModel):
     count: int
+
+
+class GetPaperOutput(BaseModel):
+    paper: PaperSummary
 
 
 def paper_to_summary(paper: Paper) -> PaperSummary:
