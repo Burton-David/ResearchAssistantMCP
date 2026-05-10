@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 from collections.abc import Awaitable, Callable
 from typing import Any
 
@@ -338,9 +339,68 @@ def build_server(
         handler = handlers.get(name)
         if handler is None:
             raise ValueError(f"unknown tool: {name}")
-        return await handler(arguments)
+        # Log every call: name, arg keys (not values — args may be large
+        # queries or paper bodies), elapsed ms, result-shape hint. The next
+        # agent debugging an issue should be able to grep the Claude Desktop
+        # log for tool=cite_paper and reconstruct the call sequence.
+        arg_keys = ",".join(sorted(arguments.keys())) or "-"
+        start = time.monotonic()
+        try:
+            result = await handler(arguments)
+        except Exception as exc:
+            elapsed_ms = (time.monotonic() - start) * 1000
+            _log.warning(
+                "tool=%s args=%s elapsed=%.0fms error=%s: %s",
+                name, arg_keys, elapsed_ms, type(exc).__name__, exc,
+            )
+            raise
+        elapsed_ms = (time.monotonic() - start) * 1000
+        _log.info(
+            "tool=%s args=%s elapsed=%.0fms results=%s",
+            name, arg_keys, elapsed_ms, _result_hint(name, result),
+        )
+        return result
 
     return server
+
+
+def _result_hint(tool_name: str, result: dict[str, Any]) -> str:
+    """A compact, log-friendly summary of a tool result's shape.
+
+    Keeps the log line short — the full payload may run hundreds of KB
+    for a search response — while preserving enough signal for grep
+    queries like "find tool calls that returned zero results".
+    """
+    if isinstance(result.get("results"), list):
+        return f"n={len(result['results'])}"
+    if tool_name == "library_status":
+        return f"count={result.get('count')}"
+    if "paper" in result and tool_name == "ingest_paper":
+        return f"library_count={result.get('library_count')}"
+    if "paper" in result:
+        return "paper=1"
+    if "citation" in result:
+        return f"format={result.get('format')}"
+    return "-"
+
+
+def _configure_logging() -> None:
+    """Set up `research_mcp.*` logging on stderr at INFO.
+
+    Scoped to our namespace so we don't override user / library logging
+    config. Idempotent — re-runs in the same process don't duplicate
+    handlers. Only the entry points (`run_default`, `run_in_memory`,
+    CLI `main`) call this; importing the module is side-effect free.
+    """
+    pkg_log = logging.getLogger("research_mcp")
+    if pkg_log.handlers:
+        return
+    handler = logging.StreamHandler()
+    handler.setFormatter(
+        logging.Formatter("%(asctime)s %(levelname)s %(name)s %(message)s")
+    )
+    pkg_log.addHandler(handler)
+    pkg_log.setLevel(logging.INFO)
 
 
 async def run_default() -> None:
@@ -437,6 +497,7 @@ async def main() -> None:
     from research_mcp._env import load_dotenv
 
     load_dotenv()
+    _configure_logging()
     if os.environ.get("RESEARCH_MCP_TEST_MODE") == "1":
         await run_in_memory()
     else:
