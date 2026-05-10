@@ -14,6 +14,9 @@ import pytest
 from research_mcp.domain.paper import Author, Paper
 from research_mcp.domain.query import SearchQuery
 from research_mcp.errors import SourceUnavailable
+from research_mcp.reranker import FakeReranker
+
+__all__ = ["FakeReranker"]  # surface so tests can import from tests.conftest
 
 
 class StaticSource:
