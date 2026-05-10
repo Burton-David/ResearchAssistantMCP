@@ -27,7 +27,9 @@ from mcp.server.stdio import stdio_server
 from pydantic import ValidationError
 
 from research_mcp import __version__
+from research_mcp.chunker import SectionAwareChunker
 from research_mcp.citation import RENDERERS
+from research_mcp.domain.chunker import Chunker
 from research_mcp.domain.citation import CitationFormat
 from research_mcp.domain.embedder import Embedder
 from research_mcp.domain.paper import Paper
@@ -42,6 +44,8 @@ from research_mcp.embedder import (
 from research_mcp.errors import SourceUnavailable
 from research_mcp.index import FaissIndex, MemoryIndex
 from research_mcp.mcp.tools import (
+    ChunkPaperInput,
+    ChunkPaperOutput,
     CitePaperInput,
     CitePaperOutput,
     FindPaperHit,
@@ -58,6 +62,7 @@ from research_mcp.mcp.tools import (
     LibraryStatusOutput,
     SearchPapersInput,
     SearchPapersOutput,
+    TextChunkSummary,
     paper_to_summary,
     source_from_id,
 )
@@ -142,6 +147,7 @@ def build_server(
     library: LibraryService | None,
     embedder_label: str | None,
     reranker_label: str | None = None,
+    chunker: Chunker | None = None,
 ) -> Server[Any, Any]:
     """Construct an MCP `Server` with the six research tools registered.
 
@@ -222,6 +228,18 @@ def build_server(
                     "you've read about to an id you can ingest or cite."
                 ),
                 inputSchema=FindPaperInput.model_json_schema(),
+            ),
+            mcp_types.Tool(
+                name="chunk_paper",
+                description=(
+                    "Section-aware chunking of a paper's text. Detects "
+                    "section headers (abstract / introduction / methodology "
+                    "/ etc) and yields one or more chunks per section. "
+                    "Useful for fine-grained recall after PDF text is "
+                    "ingested; for title+abstract-only papers, returns a "
+                    "single 'abstract' chunk."
+                ),
+                inputSchema=ChunkPaperInput.model_json_schema(),
             ),
         ]
 
@@ -307,6 +325,44 @@ def build_server(
             note=None,
         ).model_dump()
 
+    async def _do_chunk_paper(arguments: dict[str, Any]) -> dict[str, Any]:
+        if chunker is None:
+            raise ValueError(
+                "chunk_paper unavailable: no chunker configured"
+            )
+        args = ChunkPaperInput.model_validate(arguments)
+        try:
+            paper = await paper_lookup(args.paper_id)
+        except SourceUnavailable as exc:
+            raise ValueError(
+                f"could not resolve {args.paper_id!r}: "
+                f"{exc.source_name} is unavailable ({exc.short_reason()}). "
+                "This is usually transient — try again. Valid id prefixes: "
+                "'arxiv:1706.03762', 'doi:10.1038/...', 's2:abc123'."
+            ) from exc
+        if paper is None:
+            raise ValueError(
+                f"no configured source recognizes paper id {args.paper_id!r}. "
+                "Use a prefixed id like 'arxiv:1706.03762', 'doi:10.1038/...', "
+                "or 's2:abc123'."
+            )
+        chunks = await chunker.chunk(paper)
+        return ChunkPaperOutput(
+            chunks=[
+                TextChunkSummary(
+                    chunk_id=c.chunk_id,
+                    paper_id=c.paper_id,
+                    section=c.section,
+                    text=c.text,
+                    char_count=len(c.text),
+                    start_char=c.start_char,
+                    end_char=c.end_char,
+                )
+                for c in chunks
+            ],
+            chunker=chunker.name,
+        ).model_dump()
+
     async def _do_find_paper(arguments: dict[str, Any]) -> dict[str, Any]:
         args = FindPaperInput.model_validate(arguments)
         outcome = await discovery.find_paper(
@@ -362,6 +418,7 @@ def build_server(
         "library_status": _do_status,
         "get_paper": _do_get_paper,
         "find_paper": _do_find_paper,
+        "chunk_paper": _do_chunk_paper,
     }
 
     # validate_input=False bypasses the mcp SDK's strict jsonschema check so
@@ -512,6 +569,7 @@ async def run_default() -> None:
         library=library,
         embedder_label=label,
         reranker_label=reranker_label,
+        chunker=SectionAwareChunker(),
     )
     try:
         async with stdio_server() as (read_stream, write_stream):
@@ -553,6 +611,7 @@ async def run_in_memory() -> None:
         paper_lookup=paper_lookup,
         library=library,
         embedder_label="fake:test-mode",
+        chunker=SectionAwareChunker(),
     )
     try:
         async with stdio_server() as (read_stream, write_stream):

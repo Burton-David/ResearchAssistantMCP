@@ -227,6 +227,36 @@ class FindPaperOutput(BaseModel):
     """Per-source transient failures, same shape as SearchPapersOutput."""
 
 
+class ChunkPaperInput(_Strict):
+    paper_id: str = Field(
+        ...,
+        min_length=1,
+        description=(
+            "Canonical paper id with source prefix. The paper is fetched "
+            "from the originating source (no ingest required), then "
+            "section-aware chunking is applied to title + abstract "
+            "(+ full_text when present)."
+        ),
+    )
+
+
+class TextChunkSummary(BaseModel):
+    chunk_id: str
+    paper_id: str
+    section: str | None
+    text: str
+    char_count: int
+    start_char: int
+    end_char: int
+
+
+class ChunkPaperOutput(BaseModel):
+    chunks: list[TextChunkSummary]
+    chunker: str
+    """Active chunker name (e.g., 'section-aware', 'simple') so the LLM
+    caller knows which chunking semantics produced these chunks."""
+
+
 def paper_to_summary(paper: Paper, *, source: str = "") -> PaperSummary:
     """Project a `Paper` into the LLM-friendly summary view.
 
