@@ -22,7 +22,6 @@ from research_mcp.citation import RENDERERS
 from research_mcp.domain.citation import CitationFormat
 from research_mcp.domain.paper import Paper
 from research_mcp.domain.query import SearchQuery
-from research_mcp.domain.source import Source
 from research_mcp.embedder import FakeEmbedder, OpenAIEmbedder
 from research_mcp.index import FaissIndex, MemoryIndex
 from research_mcp.mcp.tools import (
@@ -181,18 +180,12 @@ async def run_default() -> None:
             "Set it to a writable directory; FAISS files will live there."
         )
     index = FaissIndex(index_path, dimension=embedder.dimension)
-    library = LibraryService(index=index, embedder=embedder, ingest_source=arxiv)
+    library = LibraryService(
+        index=index, embedder=embedder, ingest_sources=[arxiv, s2]
+    )
     search = SearchService([arxiv, s2])
-    sources_by_prefix: dict[str, Source] = {"arxiv": arxiv, "s2": s2, "doi": s2}
 
-    async def paper_lookup(paper_id: str) -> Paper | None:
-        prefix = paper_id.split(":", 1)[0]
-        source = sources_by_prefix.get(prefix)
-        if source is None:
-            return None
-        return await source.fetch(paper_id)
-
-    server = build_server(search=search, library=library, paper_lookup=paper_lookup)
+    server = build_server(search=search, library=library, paper_lookup=library.fetch)
     try:
         async with stdio_server() as (read_stream, write_stream):
             await server.run(
@@ -215,15 +208,10 @@ async def run_in_memory() -> None:
     arxiv = ArxivSource()
     embedder = FakeEmbedder(64)
     index = MemoryIndex(embedder.dimension)
-    library = LibraryService(index=index, embedder=embedder, ingest_source=arxiv)
+    library = LibraryService(index=index, embedder=embedder, ingest_sources=[arxiv])
     search = SearchService([arxiv])
 
-    async def paper_lookup(paper_id: str) -> Paper | None:
-        if paper_id.startswith("arxiv:"):
-            return await arxiv.fetch(paper_id)
-        return None
-
-    server = build_server(search=search, library=library, paper_lookup=paper_lookup)
+    server = build_server(search=search, library=library, paper_lookup=library.fetch)
     try:
         async with stdio_server() as (read_stream, write_stream):
             await server.run(

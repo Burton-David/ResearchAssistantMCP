@@ -30,19 +30,20 @@ from research_mcp.domain import (
 from research_mcp.embedder import FakeEmbedder
 from research_mcp.index import MemoryIndex
 from research_mcp.service import LibraryService, SearchService
-from research_mcp.sources import ArxivSource
+from research_mcp.sources import ArxivSource, SemanticScholarSource
 
 _BANNER = """\
 research-mcp REPL
 ─────────────────
   arxiv      : ArxivSource()
+  s2         : SemanticScholarSource()
   embedder   : FakeEmbedder(64)        # deterministic, no API keys
   index      : MemoryIndex(64)
-  library    : LibraryService(index, embedder, arxiv)
-  search     : SearchService([arxiv])
+  library    : LibraryService(index, embedder, [arxiv, s2])
+  search     : SearchService([arxiv, s2])
 
-  await q("attention is all you need")     → arXiv search
-  await library.ingest("arxiv:1706.03762") → add to local index
+  await q("attention is all you need")     → search arXiv + S2
+  await library.ingest("arxiv:1706.03762") → add to local index (also doi:/s2:)
   await library.recall("transformers")     → search local library
   cite(paper, "ama")                       → render any format
 
@@ -53,6 +54,7 @@ research-mcp REPL
 def build_namespace(*, use_openai: bool = False) -> dict[str, Any]:
     """Construct the REPL namespace. Tested independently of IPython."""
     arxiv = ArxivSource()
+    s2 = SemanticScholarSource()
     embedder: Embedder
     if use_openai:
         from research_mcp.embedder import OpenAIEmbedder
@@ -61,8 +63,8 @@ def build_namespace(*, use_openai: bool = False) -> dict[str, Any]:
     else:
         embedder = FakeEmbedder(64)
     index = MemoryIndex(embedder.dimension)
-    library = LibraryService(index=index, embedder=embedder, ingest_source=arxiv)
-    search = SearchService([arxiv])
+    library = LibraryService(index=index, embedder=embedder, ingest_sources=[arxiv, s2])
+    search = SearchService([arxiv, s2])
 
     async def q(text: str, max_results: int = 10) -> list[Paper]:
         return await search.search(SearchQuery(text=text, max_results=max_results))
@@ -80,6 +82,7 @@ def build_namespace(*, use_openai: bool = False) -> dict[str, Any]:
         "SearchQuery": SearchQuery,
         "Source": Source,
         "arxiv": arxiv,
+        "s2": s2,
         "embedder": embedder,
         "index": index,
         "library": library,

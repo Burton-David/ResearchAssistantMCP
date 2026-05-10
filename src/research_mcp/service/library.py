@@ -1,8 +1,9 @@
 """LibraryService — ingest, recall, delete, count over a local Index.
 
-Composes Index + Embedder + ingest Source. The ingest Source supplies the
-paper's metadata when ingesting by id; the Embedder turns title + abstract
-(plus full text if present) into a vector; the Index stores both.
+Composes Index + Embedder + one or more ingest Sources. Each Source's
+`fetch` is asked in turn until one resolves the id; this is how the same
+service handles `arxiv:1706.03762`, `doi:10.1038/...`, and `s2:abc123`
+without a separate prefix table at the wiring layer.
 """
 
 from __future__ import annotations
@@ -25,20 +26,43 @@ class LibraryService:
         *,
         index: Index,
         embedder: Embedder,
-        ingest_source: Source,
+        ingest_sources: Sequence[Source],
     ) -> None:
+        if not ingest_sources:
+            raise ValueError("LibraryService requires at least one ingest Source")
         self._index = index
         self._embedder = embedder
-        self._ingest_source = ingest_source
+        self._sources = tuple(ingest_sources)
 
     @property
     def index(self) -> Index:
         return self._index
 
+    @property
+    def ingest_sources(self) -> tuple[Source, ...]:
+        return self._sources
+
+    async def fetch(self, paper_id: str) -> Paper | None:
+        """Resolve a paper id against the configured Sources in order.
+
+        Returns the first Source's hit. Returns None if no Source recognized
+        the id — per the Source protocol contract, an implementation must
+        return None (not raise) for ids it does not own.
+        """
+        for source in self._sources:
+            paper = await source.fetch(paper_id)
+            if paper is not None:
+                return paper
+        return None
+
     async def ingest(self, paper_id: str) -> Paper:
-        paper = await self._ingest_source.fetch(paper_id)
+        paper = await self.fetch(paper_id)
         if paper is None:
-            raise PaperNotFoundError(paper_id)
+            names = ", ".join(s.name for s in self._sources)
+            raise PaperNotFoundError(
+                f"no configured source could resolve paper id {paper_id!r} "
+                f"(tried: {names})"
+            )
         return await self.ingest_paper(paper)
 
     async def ingest_paper(self, paper: Paper) -> Paper:

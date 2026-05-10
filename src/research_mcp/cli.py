@@ -32,6 +32,7 @@ class _CliLibrary:
     """Bundles the disposables a CLI subcommand uses, so cleanup is one place."""
 
     arxiv: ArxivSource
+    s2: SemanticScholarSource
     library: LibraryService
     index_close: Callable[[], None] | None
 
@@ -116,6 +117,7 @@ async def _ingest(paper_id: str) -> None:
         click.echo(f"Library now has {await cli_lib.library.count()} paper(s).")
     finally:
         await cli_lib.arxiv.aclose()
+        await cli_lib.s2.aclose()
         if cli_lib.index_close is not None:
             cli_lib.index_close()
 
@@ -139,6 +141,7 @@ async def _recall(query: str, k: int) -> None:
             click.echo(f"{score:.4f}\t{paper.id}\t{paper.title}")
     finally:
         await cli_lib.arxiv.aclose()
+        await cli_lib.s2.aclose()
         if cli_lib.index_close is not None:
             cli_lib.index_close()
 
@@ -198,5 +201,8 @@ def _build_library_for_cli() -> _CliLibrary:
         embedder = FakeEmbedder(64)
         index = MemoryIndex(embedder.dimension)
         index_close = None
-    library = LibraryService(index=index, embedder=embedder, ingest_source=arxiv)
-    return _CliLibrary(arxiv=arxiv, library=library, index_close=index_close)
+    s2 = SemanticScholarSource()
+    library = LibraryService(
+        index=index, embedder=embedder, ingest_sources=[arxiv, s2]
+    )
+    return _CliLibrary(arxiv=arxiv, s2=s2, library=library, index_close=index_close)
