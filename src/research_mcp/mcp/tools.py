@@ -257,6 +257,59 @@ class ChunkPaperOutput(BaseModel):
     caller knows which chunking semantics produced these chunks."""
 
 
+# ---- extract_claims ----
+
+# Cap input length so a 50KB paste doesn't lock the spaCy pipeline. 20K
+# chars is roughly an 8-page draft which is the upper end of "paragraph
+# the user wants citations for" — anything bigger should be chunked
+# upstream first.
+_MAX_DRAFT_CHARS = 20_000
+
+ClaimTypeLiteral = Literal[
+    "statistical",
+    "methodological",
+    "comparative",
+    "theoretical",
+    "causal",
+    "factual",
+    "evaluative",
+]
+
+
+class ExtractClaimsInput(_Strict):
+    text: NonBlankStr = Field(
+        ...,
+        max_length=_MAX_DRAFT_CHARS,
+        description=(
+            "Draft text (paragraph or short section) to scan for claims "
+            "that need citations. Returns one claim per detected pattern, "
+            "ordered by position in the text."
+        ),
+    )
+
+    @field_validator("text")
+    @classmethod
+    def _text_not_blank(cls, value: str) -> str:
+        return _reject_blank(value)
+
+
+class ClaimSummary(BaseModel):
+    text: str
+    type: ClaimTypeLiteral
+    confidence: float
+    context: str
+    suggested_search_terms: list[str]
+    start_char: int
+    end_char: int
+
+
+class ExtractClaimsOutput(BaseModel):
+    claims: list[ClaimSummary]
+    extractor: str
+    """Active extractor name ('spacy' / 'fake' / future LLM extractors)
+    so the LLM caller knows the precision tier of these claims."""
+
+
 def paper_to_summary(paper: Paper, *, source: str = "") -> PaperSummary:
     """Project a `Paper` into the LLM-friendly summary view.
 

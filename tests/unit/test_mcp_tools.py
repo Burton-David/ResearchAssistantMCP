@@ -288,3 +288,35 @@ def test_get_paper_input_rejects_blank_id() -> None:
 
     with pytest.raises(ValidationError):
         GetPaperInput.model_validate({"paper_id": ""})
+
+
+def test_extract_claims_input_requires_text() -> None:
+    from research_mcp.mcp.tools import ExtractClaimsInput
+
+    with pytest.raises(ValidationError):
+        ExtractClaimsInput.model_validate({})
+
+
+def test_extract_claims_input_rejects_blank_text() -> None:
+    from research_mcp.mcp.tools import ExtractClaimsInput
+
+    with pytest.raises(ValidationError):
+        ExtractClaimsInput.model_validate({"text": "   "})
+
+
+def test_extract_claims_input_caps_at_20k_chars() -> None:
+    """Bound the spaCy pipeline's worst-case input — past 20K chars the
+    user should chunk first instead of pasting a whole paper."""
+    from research_mcp.mcp.tools import ExtractClaimsInput
+
+    with pytest.raises(ValidationError):
+        ExtractClaimsInput.model_validate({"text": "x" * 20_001})
+
+
+def test_extract_claims_input_accepts_normal_paragraph() -> None:
+    from research_mcp.mcp.tools import ExtractClaimsInput
+
+    parsed = ExtractClaimsInput.model_validate(
+        {"text": "Our model outperforms BERT by 12% on three benchmarks."}
+    )
+    assert "outperforms" in parsed.text

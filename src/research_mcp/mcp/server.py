@@ -31,6 +31,7 @@ from research_mcp.chunker import SectionAwareChunker
 from research_mcp.citation import RENDERERS
 from research_mcp.domain.chunker import Chunker
 from research_mcp.domain.citation import CitationFormat
+from research_mcp.domain.claim import ClaimExtractor
 from research_mcp.domain.embedder import Embedder
 from research_mcp.domain.paper import Paper
 from research_mcp.domain.query import SearchQuery
@@ -48,6 +49,9 @@ from research_mcp.mcp.tools import (
     ChunkPaperOutput,
     CitePaperInput,
     CitePaperOutput,
+    ClaimSummary,
+    ExtractClaimsInput,
+    ExtractClaimsOutput,
     FindPaperHit,
     FindPaperInput,
     FindPaperOutput,
@@ -144,6 +148,26 @@ def _select_reranker() -> tuple[Reranker | None, str | None]:
     )
 
 
+def _select_claim_extractor() -> ClaimExtractor | None:
+    """Try to construct the spaCy-backed claim extractor; return None on
+    missing dependency rather than crashing the server.
+
+    Boot-time failure here would lock out the eight existing tools just
+    because the optional [claim-extraction] extra wasn't installed.
+    Instead we degrade gracefully: extract_claims refuses with a clear
+    install hint, and everything else keeps working.
+    """
+    try:
+        from research_mcp.claim_extractor import SpacyClaimExtractor
+    except ImportError:  # pragma: no cover — defensive; real failure is below
+        return None
+    try:
+        return SpacyClaimExtractor()
+    except RuntimeError as exc:
+        _log.warning("claim_extractor unavailable: %s", exc)
+        return None
+
+
 def build_server(
     *,
     search: SearchService,
@@ -153,6 +177,7 @@ def build_server(
     embedder_label: str | None,
     reranker_label: str | None = None,
     chunker: Chunker | None = None,
+    claim_extractor: ClaimExtractor | None = None,
 ) -> Server[Any, Any]:
     """Construct an MCP `Server` with the six research tools registered.
 
@@ -245,6 +270,20 @@ def build_server(
                     "single 'abstract' chunk."
                 ),
                 inputSchema=ChunkPaperInput.model_json_schema(),
+            ),
+            mcp_types.Tool(
+                name="extract_claims",
+                description=(
+                    "Scan draft text and identify claims that need citations: "
+                    "statistical (percentages, p-values, sample sizes), "
+                    "methodological (techniques, algorithms), comparative "
+                    "(outperforms / better than), causal, and theoretical. "
+                    "Each claim carries its type, a confidence score, the "
+                    "surrounding context, and suggested search terms — feed "
+                    "those into search_papers / find_citations to find the "
+                    "papers worth citing."
+                ),
+                inputSchema=ExtractClaimsInput.model_json_schema(),
             ),
         ]
 
@@ -368,6 +407,31 @@ def build_server(
             chunker=chunker.name,
         ).model_dump()
 
+    async def _do_extract_claims(arguments: dict[str, Any]) -> dict[str, Any]:
+        if claim_extractor is None:
+            raise ValueError(
+                "extract_claims unavailable: no claim extractor configured. "
+                "Install the optional [claim-extraction] extra (spaCy + "
+                "en_core_web_sm)."
+            )
+        args = ExtractClaimsInput.model_validate(arguments)
+        claims = await claim_extractor.extract(args.text)
+        return ExtractClaimsOutput(
+            claims=[
+                ClaimSummary(
+                    text=c.text,
+                    type=c.type.value,
+                    confidence=c.confidence,
+                    context=c.context,
+                    suggested_search_terms=list(c.suggested_search_terms),
+                    start_char=c.start_char,
+                    end_char=c.end_char,
+                )
+                for c in claims
+            ],
+            extractor=claim_extractor.name,
+        ).model_dump()
+
     async def _do_find_paper(arguments: dict[str, Any]) -> dict[str, Any]:
         args = FindPaperInput.model_validate(arguments)
         outcome = await discovery.find_paper(
@@ -424,6 +488,7 @@ def build_server(
         "get_paper": _do_get_paper,
         "find_paper": _do_find_paper,
         "chunk_paper": _do_chunk_paper,
+        "extract_claims": _do_extract_claims,
     }
 
     # validate_input=False bypasses the mcp SDK's strict jsonschema check so
@@ -591,6 +656,7 @@ async def run_default() -> None:
         embedder_label=label,
         reranker_label=reranker_label,
         chunker=SectionAwareChunker(),
+        claim_extractor=_select_claim_extractor(),
     )
     try:
         async with stdio_server() as (read_stream, write_stream):
@@ -637,6 +703,7 @@ async def run_in_memory() -> None:
         library=library,
         embedder_label="fake:test-mode",
         chunker=SectionAwareChunker(),
+        claim_extractor=_select_claim_extractor(),
     )
     try:
         async with stdio_server() as (read_stream, write_stream):

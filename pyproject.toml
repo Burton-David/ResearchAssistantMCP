@@ -47,6 +47,7 @@ dev = [
     "ipython>=8.20",
 ]
 sentence-transformers = ["sentence-transformers>=2.7"]
+claim-extraction = ["spacy>=3.7"]
 
 [project.scripts]
 research-mcp = "research_mcp.cli:main"
