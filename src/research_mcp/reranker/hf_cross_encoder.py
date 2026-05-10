@@ -72,19 +72,14 @@ class HuggingFaceCrossEncoderReranker:
         )
         self._model: Any = None
         self._load_lock = threading.Lock()
-        # Cross-encoders don't expose dimension the way bi-encoders do —
-        # callers don't need it (the score is scalar) — so we don't bother
-        # caching one. We DO eager-load on init, however, so a typo'd
-        # model name surfaces as a clean error rather than at first call.
-        try:
-            self._load_model()
-        except Exception as exc:
-            raise RuntimeError(
-                f"could not load cross-encoder model {model!r}. Verify the "
-                f"model name (set via RESEARCH_MCP_RERANKER=cross-encoder:"
-                f"<model>) matches a real Hugging Face Hub repo. Underlying "
-                f"error: {type(exc).__name__}: {exc}"
-            ) from exc
+        # Lazy-load by design. Earlier versions eager-loaded the model
+        # to fail fast on typos, but that pushed server boot past
+        # Claude Desktop's MCP initialize-handshake timeout — the
+        # ~5-10s sentence-transformers warmup blocked tool registration
+        # entirely. Now the model loads on first `.score()` call. To
+        # still catch a typo'd model name at config time, the wiring
+        # layer can call `validate()` post-construct — see
+        # `validate_model_available()` below.
 
     def _load_model(self) -> Any:
         """Idempotent, thread-safe model loader."""

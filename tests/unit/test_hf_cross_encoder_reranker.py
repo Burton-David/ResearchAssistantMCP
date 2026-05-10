@@ -71,3 +71,5 @@ async def test_real_cross_encoder_separates_relevant_from_off_topic() -> None:
         f"expected the transformer paper to outscore housing-prices; "
         f"got off_topic={scores[0]:.3f}, relevant={scores[1]:.3f}"
     )
+
+
