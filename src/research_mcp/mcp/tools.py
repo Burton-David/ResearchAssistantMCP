@@ -72,6 +72,23 @@ class IngestPaperInput(_Strict):
     without losing functionality.
     """
 
+    # Schema-level mutual exclusivity: a client validating against the
+    # generated JSON Schema (Claude Desktop / Claude Code do) sees a
+    # clean validation error before the call hits the server. The
+    # `model_validator` below still runs as belt-and-suspenders for
+    # callers that bypass schema validation. Without this oneOf, the
+    # generated schema only enforces extra="forbid"; the "exactly one
+    # of paper_id or query" rule lives only server-side.
+    model_config = ConfigDict(
+        extra="forbid",
+        json_schema_extra={
+            "oneOf": [
+                {"required": ["paper_id"], "not": {"required": ["query"]}},
+                {"required": ["query"], "not": {"required": ["paper_id"]}},
+            ],
+        },
+    )
+
     paper_id: str | None = Field(
         None,
         min_length=1,

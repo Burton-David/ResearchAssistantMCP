@@ -125,6 +125,33 @@ def test_ingest_paper_input_default_max_papers_when_query_given() -> None:
     assert parsed.max_papers == 20  # documented default
 
 
+def test_ingest_paper_input_schema_carries_one_of_constraint() -> None:
+    """Mutual exclusivity is enforced at TWO layers:
+      - server: model_validator catches it post-parse;
+      - client/protocol: the generated JSON Schema's `oneOf` lets the
+        MCP client reject the call before it ever hits the server.
+    Lock the schema-level constraint down so a refactor can't silently
+    demote it to server-only enforcement."""
+    schema = IngestPaperInput.model_json_schema()
+    assert "oneOf" in schema, (
+        "IngestPaperInput must expose `oneOf` in its JSON Schema so "
+        "clients can validate mutual exclusivity before the call "
+        "reaches the server."
+    )
+    branches = schema["oneOf"]
+    # Two branches: one requires paper_id, one requires query, neither
+    # allows both.
+    assert len(branches) == 2
+    required_sets = [frozenset(b.get("required", [])) for b in branches]
+    assert frozenset({"paper_id"}) in required_sets
+    assert frozenset({"query"}) in required_sets
+    # Each branch must also forbid the OTHER field — otherwise oneOf
+    # technically permits both being set.
+    for branch in branches:
+        assert "not" in branch
+        assert "required" in branch["not"]
+
+
 async def test_mcp_prompt_review_draft_renders_user_message() -> None:
     """The server ships one MCP Prompt — `review_draft_for_citations` —
     that bundles the right framing for assist_draft. Lock down the
