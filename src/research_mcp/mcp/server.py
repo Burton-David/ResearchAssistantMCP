@@ -241,8 +241,9 @@ def build_server(
             paper = await paper_lookup(args.paper_id)
         except SourceUnavailable as exc:
             raise ValueError(
-                f"could not resolve {args.paper_id!r}: source {exc.source_name!r} "
-                f"is unavailable ({exc.reason}). This is usually transient — try again."
+                f"could not resolve {args.paper_id!r}: source "
+                f"{exc.source_name!r} is unavailable ({exc.short_reason()}). "
+                "This is usually transient — try again."
             ) from exc
         if paper is None:
             raise ValueError(
@@ -275,6 +276,15 @@ def build_server(
         hits = await discovery.find_paper(
             title=args.title, authors=tuple(args.authors)
         )
+        note: str | None = None
+        if not hits:
+            from research_mcp.service.discovery import has_significant_tokens
+
+            if not has_significant_tokens(args.title):
+                note = (
+                    "title contained only stopwords; no significant tokens "
+                    "to match against. Try a more specific title."
+                )
         return FindPaperOutput(
             results=[
                 FindPaperHit(
@@ -282,7 +292,8 @@ def build_server(
                     confidence=h.confidence,
                 )
                 for h in hits
-            ]
+            ],
+            note=note,
         ).model_dump()
 
     async def _do_get_paper(arguments: dict[str, Any]) -> dict[str, Any]:
@@ -291,8 +302,9 @@ def build_server(
             paper = await paper_lookup(args.paper_id)
         except SourceUnavailable as exc:
             raise ValueError(
-                f"could not resolve {args.paper_id!r}: source {exc.source_name!r} "
-                f"is unavailable ({exc.reason}). This is usually transient — try again."
+                f"could not resolve {args.paper_id!r}: source "
+                f"{exc.source_name!r} is unavailable ({exc.short_reason()}). "
+                "This is usually transient — try again."
             ) from exc
         if paper is None:
             raise ValueError(

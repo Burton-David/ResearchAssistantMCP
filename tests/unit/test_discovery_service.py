@@ -119,3 +119,23 @@ async def test_zero_confidence_results_filtered_out() -> None:
     # but the title-token Jaccard is 0, so it should be filtered.
     hits = await discovery.find_paper("Attention Is All You Need")
     assert hits == []
+
+
+async def test_empty_authors_list_works() -> None:
+    """Locks the 'authors=()' contract — find_paper must handle the no-author
+    case the same way as authors-supplied for the title-only ranking path."""
+    src = _ReturnAllSource("arxiv", [_vaswani(), _decoy("Vision Transformers")])
+    discovery = DiscoveryService(SearchService([src]))
+    hits = await discovery.find_paper("Attention Is All You Need", authors=())
+    assert hits, "expected at least one hit"
+    assert hits[0].paper.id == _vaswani().id
+
+
+def test_has_significant_tokens_predicate() -> None:
+    """The MCP layer uses this to surface a 'all-stopwords' note."""
+    from research_mcp.service.discovery import has_significant_tokens
+
+    assert has_significant_tokens("Attention Is All You Need") is True
+    assert has_significant_tokens("a the of and an") is False
+    assert has_significant_tokens("") is False
+    assert has_significant_tokens("   ") is False

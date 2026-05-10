@@ -65,6 +65,15 @@ class FaissIndex:
         self._dimension = dimension
         self._dir = Path(path)
         self._dir.mkdir(parents=True, exist_ok=True)
+        # Probe writability up front so the user sees a clear message instead
+        # of an opaque sqlite3.OperationalError further into __init__.
+        if not os.access(self._dir, os.W_OK):
+            raise PermissionError(
+                f"RESEARCH_MCP_INDEX_PATH={self._dir} is not writable. "
+                "Set it to a directory where the running process can create "
+                "files; FAISS state and the SQLite metadata both need write "
+                "access."
+            )
         self._faiss_path = self._dir / "vectors.faiss"
         self._sqlite_path = self._dir / "papers.sqlite"
         self._lock = asyncio.Lock()

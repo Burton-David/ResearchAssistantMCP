@@ -81,10 +81,18 @@ class SentenceTransformersEmbedder:
         with self._load_lock:
             if self._model is not None:
                 return self._model
+            # Quiet the HF stack's stderr chatter — the unauthenticated-Hub
+            # warning, transformers' INFO logs, and the per-shard download
+            # progress bar would all leak into Claude Desktop's log file.
+            # Set before import so module-level `logging.getLogger(...)` calls
+            # in transformers/sentence_transformers see the level.
+            os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")
+            os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
             try:
-                from sentence_transformers import (  # type: ignore[import-not-found]  # optional extra
-                    SentenceTransformer,
-                )
+                # The dep is an optional extra; mypy sees it now (installed
+                # in our dev venv) but consumers without [sentence-transformers]
+                # will hit the ImportError handler.
+                from sentence_transformers import SentenceTransformer
             except ImportError as exc:
                 raise RuntimeError(
                     "SentenceTransformersEmbedder requires the optional "

@@ -55,6 +55,19 @@ def test_year_equal_min_max_accepted() -> None:
     assert parsed.year_min == 2020 and parsed.year_max == 2020
 
 
+def test_query_capped_at_500_chars() -> None:
+    """Long queries hit upstream URL/body length limits; reject up front."""
+    with pytest.raises(ValidationError):
+        SearchPapersInput.model_validate({"query": "x" * 501})
+
+
+def test_find_paper_title_capped_at_500_chars() -> None:
+    from research_mcp.mcp.tools import FindPaperInput
+
+    with pytest.raises(ValidationError):
+        FindPaperInput.model_validate({"title": "x" * 501})
+
+
 def test_max_results_capped_at_100() -> None:
     with pytest.raises(ValidationError):
         SearchPapersInput.model_validate({"query": "x", "max_results": 9999})

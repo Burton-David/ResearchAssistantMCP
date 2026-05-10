@@ -117,6 +117,16 @@ def _title_tokens(title: str) -> set[str]:
     }
 
 
+def has_significant_tokens(title: str) -> bool:
+    """Public predicate: does this title produce at least one non-stopword token?
+
+    Used by the MCP layer to surface a "your title was all stopwords" note
+    when find_paper returns empty for that structural reason rather than
+    upstream relevance failure.
+    """
+    return bool(_title_tokens(title))
+
+
 def _surname(author_name: str | Author) -> str:
     raw = author_name.name if isinstance(author_name, Author) else author_name
     raw = raw.strip()

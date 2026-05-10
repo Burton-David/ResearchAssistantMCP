@@ -28,8 +28,12 @@ def _reject_blank(value: str) -> str:
 
 
 # Reusable validated query string: rejects "", "   ", "\n\n" up front so the
-# user gets a real error instead of a silent empty result list.
-NonBlankStr = Annotated[str, Field(..., min_length=1)]
+# user gets a real error instead of a silent empty result list. Cap at 500
+# chars so an over-long query doesn't get rejected by upstream APIs (arXiv's
+# URL length cap, S2's body validation) only to come back as a confusing
+# transient-error with no signal that the input was the problem.
+_MAX_QUERY_CHARS = 500
+NonBlankStr = Annotated[str, Field(..., min_length=1, max_length=_MAX_QUERY_CHARS)]
 
 
 class SearchPapersInput(_Strict):
@@ -113,6 +117,7 @@ class FindPaperInput(_Strict):
     )
     authors: list[str] = Field(
         default_factory=list,
+        max_length=20,
         description=(
             "Optional author names; surnames are extracted automatically and "
             "used to break ties between same-titled papers by different authors."
@@ -205,6 +210,9 @@ class FindPaperHit(BaseModel):
 
 class FindPaperOutput(BaseModel):
     results: list[FindPaperHit]
+    note: str | None = None
+    """Hint surfaced when the result is empty for a structural reason —
+    e.g., the title was all stopwords and produced no Jaccard tokens."""
 
 
 def paper_to_summary(paper: Paper, *, source: str = "") -> PaperSummary:

@@ -63,6 +63,22 @@ async def test_dimension_mismatch_on_reload_raises(tmp_path: Path) -> None:
         FaissIndex(tmp_path, 32)
 
 
+def test_read_only_index_path_raises_friendly_error(tmp_path: Path) -> None:
+    """An unwritable RESEARCH_MCP_INDEX_PATH should fail fast with a hint
+    rather than crashing several layers in with a raw SQLite traceback."""
+    import os
+    import stat
+
+    tmp_path.chmod(stat.S_IRUSR | stat.S_IXUSR)  # 0o500 — read+execute only
+    try:
+        with pytest.raises(PermissionError, match="RESEARCH_MCP_INDEX_PATH"):
+            FaissIndex(tmp_path, 16)
+    finally:
+        # Restore so pytest can clean up.
+        tmp_path.chmod(stat.S_IRWXU)
+        del os  # keep mypy quiet about unused
+
+
 async def test_delete_then_recall_does_not_return_deleted(tmp_path: Path) -> None:
     e = FakeEmbedder(16)
     idx = FaissIndex(tmp_path, 16)
