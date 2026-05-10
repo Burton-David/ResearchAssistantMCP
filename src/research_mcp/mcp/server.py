@@ -69,7 +69,12 @@ from research_mcp.mcp.tools import (
 from research_mcp.reranker import HuggingFaceCrossEncoderReranker
 from research_mcp.service import DiscoveryService, LibraryService, SearchService
 from research_mcp.service.library import fetch_from_sources
-from research_mcp.sources import ArxivSource, PubMedSource, SemanticScholarSource
+from research_mcp.sources import (
+    ArxivSource,
+    OpenAlexSource,
+    PubMedSource,
+    SemanticScholarSource,
+)
 
 _log = logging.getLogger(__name__)
 
@@ -540,6 +545,14 @@ async def run_default() -> None:
     if os.environ.get("RESEARCH_MCP_DISABLE_PUBMED") != "1":
         pubmed = PubMedSource()
         sources_list.append(pubmed)
+    # OpenAlex is opt-in: their polite-pool guidance requires a `mailto`,
+    # and rather than ship a placeholder we treat the email as the
+    # opt-in signal. Set RESEARCH_MCP_OPENALEX_EMAIL to enable.
+    openalex: OpenAlexSource | None = None
+    openalex_email = os.environ.get("RESEARCH_MCP_OPENALEX_EMAIL")
+    if openalex_email:
+        openalex = OpenAlexSource(email=openalex_email)
+        sources_list.append(openalex)
     sources: tuple[Source, ...] = tuple(sources_list)
     reranker, reranker_label = _select_reranker()
     search = SearchService(sources, reranker=reranker)
@@ -591,6 +604,8 @@ async def run_default() -> None:
         await s2.aclose()
         if pubmed is not None:
             await pubmed.aclose()
+        if openalex is not None:
+            await openalex.aclose()
         if index_to_close is not None:
             index_to_close.close()
 
