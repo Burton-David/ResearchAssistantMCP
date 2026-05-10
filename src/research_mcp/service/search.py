@@ -37,8 +37,20 @@ from types import MappingProxyType
 
 from research_mcp.domain.paper import Author, Paper
 from research_mcp.domain.query import SearchQuery
+from research_mcp.domain.reranker import Reranker
 from research_mcp.domain.source import Source
 from research_mcp.errors import SourceUnavailable
+
+# When a reranker is configured, fetch this many times the user-requested
+# max_results from each Source before reranking. The standard recipe is
+# bi-encoder→top-50, cross-encoder→top-K. With max_results=10 and 5x
+# widening we ask each Source for 50; after dedup that's typically ~50-100
+# unique candidates to rerank.
+_RERANK_POOL_FACTOR = 5
+
+# Hard cap on the per-source request size; arXiv and S2 both cap their own
+# responses around 100. Going past doesn't help quality and risks 429s.
+_MAX_RERANK_POOL = 50
 
 _log = logging.getLogger(__name__)
 
@@ -86,18 +98,44 @@ class SearchOutcome:
 
 
 class SearchService:
-    def __init__(self, sources: Sequence[Source]) -> None:
+    def __init__(
+        self,
+        sources: Sequence[Source],
+        *,
+        reranker: Reranker | None = None,
+    ) -> None:
         if not sources:
             raise ValueError("SearchService requires at least one Source")
         self._sources = tuple(sources)
+        self._reranker = reranker
 
     @property
     def sources(self) -> tuple[Source, ...]:
         return self._sources
 
+    @property
+    def reranker(self) -> Reranker | None:
+        return self._reranker
+
     async def search(self, query: SearchQuery) -> SearchOutcome:
+        # When a reranker is configured, widen the per-source request so the
+        # cross-encoder has more candidates to choose from. The merged
+        # candidate set is then reranked and truncated to max_results.
+        if self._reranker is None:
+            upstream_query = query
+        else:
+            widened = min(
+                query.max_results * _RERANK_POOL_FACTOR, _MAX_RERANK_POOL
+            )
+            upstream_query = SearchQuery(
+                text=query.text,
+                max_results=max(widened, query.max_results),
+                year_min=query.year_min,
+                year_max=query.year_max,
+                authors=query.authors,
+            )
         outcomes = await asyncio.gather(
-            *(s.search(query) for s in self._sources),
+            *(s.search(upstream_query) for s in self._sources),
             return_exceptions=True,
         )
         per_source: list[list[Paper]] = []
@@ -123,9 +161,17 @@ class SearchService:
         # an enriched record with potentially new ids.
         key_to_index: dict[str, int] = {}
 
+        # When a reranker is set, keep the full deduped pool (so the
+        # cross-encoder gets the broadest candidate set possible) and
+        # truncate at the end. Without a reranker, stop merging once we
+        # have max_results — same as before.
+        merge_cap = (
+            upstream_query.max_results if self._reranker is not None
+            else query.max_results
+        )
         max_depth = max((len(papers) for papers in per_source), default=0)
         for depth in range(max_depth):
-            if len(merged) >= query.max_results:
+            if len(merged) >= merge_cap:
                 break
             for source_index, papers in enumerate(per_source):
                 if depth >= len(papers):
@@ -147,8 +193,32 @@ class SearchService:
                 idx = len(merged) - 1
                 for k in keys:
                     key_to_index[k] = idx
-                if len(merged) >= query.max_results:
+                if len(merged) >= merge_cap:
                     break
+
+        # Rerank if configured and we have candidates. On failure, fall back
+        # to the bi-encoder ordering and surface the failure as a partial.
+        if self._reranker is not None and merged:
+            try:
+                scores = await self._reranker.score(query.text, merged)
+            except Exception as exc:
+                failures.append(
+                    f"reranker:{self._reranker.name}: "
+                    f"{type(exc).__name__}: {exc}"
+                )
+                _log.warning(
+                    "reranker %r failed: %s; falling back to bi-encoder order",
+                    self._reranker.name, exc,
+                )
+            else:
+                order = sorted(
+                    range(len(merged)), key=lambda i: scores[i], reverse=True
+                )
+                merged = [merged[i] for i in order]
+                contributors = [contributors[i] for i in order]
+
+        merged = merged[: query.max_results]
+        contributors = contributors[: query.max_results]
 
         return SearchOutcome(
             results=[

@@ -8,17 +8,30 @@ without a separate prefix table at the wiring layer.
 The id-resolution loop is also exposed as the free `fetch_from_sources`
 function so callers that don't need an embedder (cite_paper, get_paper)
 can resolve ids without depending on a fully constructed LibraryService.
+
+`recall` optionally composes with a Reranker. When set, it pulls a wider
+candidate set from the FAISS index than the user asked for, runs the
+reranker, and truncates to the user's k. Reranker failure falls back to
+the bi-encoder cosine ordering with a logged warning.
 """
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Sequence
 
 from research_mcp.domain.embedder import Embedder
 from research_mcp.domain.index import Index
 from research_mcp.domain.paper import Paper
+from research_mcp.domain.reranker import Reranker
 from research_mcp.domain.source import Source
 from research_mcp.errors import SourceUnavailable
+
+_log = logging.getLogger(__name__)
+
+# When a reranker is configured, fetch this many times the user-requested k
+# from FAISS before reranking. Mirrors the SearchService policy.
+_RECALL_RERANK_POOL_FACTOR = 5
 
 
 async def fetch_from_sources(
@@ -64,12 +77,14 @@ class LibraryService:
         index: Index,
         embedder: Embedder,
         ingest_sources: Sequence[Source],
+        reranker: Reranker | None = None,
     ) -> None:
         if not ingest_sources:
             raise ValueError("LibraryService requires at least one ingest Source")
         self._index = index
         self._embedder = embedder
         self._sources = tuple(ingest_sources)
+        self._reranker = reranker
 
     @property
     def index(self) -> Index:
@@ -78,6 +93,10 @@ class LibraryService:
     @property
     def ingest_sources(self) -> tuple[Source, ...]:
         return self._sources
+
+    @property
+    def reranker(self) -> Reranker | None:
+        return self._reranker
 
     async def fetch(self, paper_id: str) -> Paper | None:
         """Resolve a paper id against the configured Sources in order.
@@ -104,8 +123,39 @@ class LibraryService:
         return paper
 
     async def recall(self, query: str, k: int = 10) -> Sequence[tuple[Paper, float]]:
+        """Top-k papers from the local index for `query`.
+
+        Without a reranker: returns FAISS cosine similarity tuples directly.
+
+        With a reranker: pulls `k * _RECALL_RERANK_POOL_FACTOR` from FAISS,
+        rescores with the cross-encoder, returns top k by reranker score.
+        Reranker failure falls back to the bi-encoder ordering — cosine
+        scores still work, the request still completes; we log a warning
+        but don't raise. The caller's score field carries cosine in the
+        fallback case and reranker score otherwise.
+        """
         [vector] = await self._embedder.embed([query])
-        return await self._index.search(vector, k=k)
+        if self._reranker is None:
+            return await self._index.search(vector, k=k)
+
+        pool_k = max(k, k * _RECALL_RERANK_POOL_FACTOR)
+        candidates = await self._index.search(vector, k=pool_k)
+        if not candidates:
+            return []
+        papers = [p for p, _ in candidates]
+        try:
+            scores = await self._reranker.score(query, papers)
+        except Exception as exc:
+            _log.warning(
+                "reranker %r failed during recall: %s; falling back to "
+                "FAISS cosine ordering",
+                self._reranker.name, exc,
+            )
+            return list(candidates)[:k]
+        ranked: list[tuple[Paper, float]] = sorted(
+            zip(papers, scores, strict=True), key=lambda t: t[1], reverse=True
+        )
+        return ranked[:k]
 
     async def delete(self, paper_id: str) -> None:
         await self._index.delete([paper_id])

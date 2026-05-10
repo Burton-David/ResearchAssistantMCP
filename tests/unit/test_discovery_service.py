@@ -2,39 +2,13 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
-
 import pytest
 
 from research_mcp.domain.paper import Author, Paper
-from research_mcp.domain.query import SearchQuery
 from research_mcp.service import DiscoveryService, SearchService
+from tests.conftest import ReturnAllSource
 
 pytestmark = pytest.mark.unit
-
-
-class _ReturnAllSource:
-    """Test source that returns its full paper list for every query.
-
-    `StaticSource` uses substring matching, which doesn't compose well with
-    Discovery's multi-word query (title + author surnames) — the substring
-    rarely matches. Real search APIs do token-level matching, which is
-    closer to what `_ReturnAllSource` does here. The Discovery service is
-    responsible for re-ranking what the source returns; this source's job
-    in the test is just to surface the candidates."""
-
-    def __init__(self, name: str, papers: Sequence[Paper]) -> None:
-        self.name = name
-        self._papers = list(papers)
-
-    async def search(self, query: SearchQuery) -> Sequence[Paper]:
-        return self._papers[: query.max_results]
-
-    async def fetch(self, paper_id: str) -> Paper | None:
-        for p in self._papers:
-            if p.id == paper_id:
-                return p
-        return None
 
 
 def _vaswani() -> Paper:
@@ -57,7 +31,7 @@ def _decoy(title: str) -> Paper:
 
 
 async def test_finds_canonical_paper_in_top_position() -> None:
-    src = _ReturnAllSource(
+    src = ReturnAllSource(
         "arxiv",
         [
             _decoy("Do You Even Need Attention"),
@@ -86,7 +60,7 @@ async def test_author_match_breaks_tie_between_same_titled_papers() -> None:
         abstract="",
         authors=(Author("Bob Jones"),),
     )
-    src = _ReturnAllSource("arxiv", [jones_paper, smith_paper])
+    src = ReturnAllSource("arxiv", [jones_paper, smith_paper])
     discovery = DiscoveryService(SearchService([src]))
     outcome = await discovery.find_paper("A Survey", authors=("Alice Smith",))
     assert outcome.hits[0].paper.id == "x:smith"
@@ -94,7 +68,7 @@ async def test_author_match_breaks_tie_between_same_titled_papers() -> None:
 
 
 async def test_returns_empty_for_blank_title() -> None:
-    src = _ReturnAllSource("arxiv", [_vaswani()])
+    src = ReturnAllSource("arxiv", [_vaswani()])
     discovery = DiscoveryService(SearchService([src]))
     outcome = await discovery.find_paper("   ")
     assert outcome.hits == []
@@ -102,21 +76,21 @@ async def test_returns_empty_for_blank_title() -> None:
 
 async def test_caps_at_three_results() -> None:
     decoys = [_decoy(f"Attention Variant {i}") for i in range(10)]
-    src = _ReturnAllSource("arxiv", decoys)
+    src = ReturnAllSource("arxiv", decoys)
     discovery = DiscoveryService(SearchService([src]))
     outcome = await discovery.find_paper("Attention Variant")
     assert len(outcome.hits) <= 3
 
 
 async def test_zero_confidence_results_filtered_out() -> None:
-    src = _ReturnAllSource("arxiv", [_decoy("Quantum Cryptography in Bovine Lactation")])
+    src = ReturnAllSource("arxiv", [_decoy("Quantum Cryptography in Bovine Lactation")])
     discovery = DiscoveryService(SearchService([src]))
     outcome = await discovery.find_paper("Attention Is All You Need")
     assert outcome.hits == []
 
 
 async def test_empty_authors_list_works() -> None:
-    src = _ReturnAllSource("arxiv", [_vaswani(), _decoy("Vision Transformers")])
+    src = ReturnAllSource("arxiv", [_vaswani(), _decoy("Vision Transformers")])
     discovery = DiscoveryService(SearchService([src]))
     outcome = await discovery.find_paper("Attention Is All You Need", authors=())
     assert outcome.hits, "expected at least one hit"
@@ -130,7 +104,7 @@ async def test_partial_failures_pass_through_from_search() -> None:
     from tests.conftest import UnavailableSource
 
     src_a = UnavailableSource("arxiv", "HTTP 429")
-    src_b = _ReturnAllSource("semantic_scholar", [_vaswani()])
+    src_b = ReturnAllSource("semantic_scholar", [_vaswani()])
     discovery = DiscoveryService(SearchService([src_a, src_b]))
     outcome = await discovery.find_paper("Attention Is All You Need")
     # Hit still surfaces from the live source.

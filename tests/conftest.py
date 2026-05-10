@@ -43,6 +43,30 @@ class StaticSource:
         return None
 
 
+class ReturnAllSource:
+    """A `Source` that returns its full paper list for every query.
+
+    Useful for testing reranker / discovery behavior where the test wants
+    to control what candidates reach the service layer regardless of upstream
+    relevance ranking. `StaticSource`'s substring matching gets in the way
+    when the query is a multi-word phrase that doesn't appear verbatim in
+    any title.
+    """
+
+    def __init__(self, name: str, papers: Sequence[Paper]) -> None:
+        self.name = name
+        self._papers = list(papers)
+
+    async def search(self, query: SearchQuery) -> Sequence[Paper]:
+        return self._papers[: query.max_results]
+
+    async def fetch(self, paper_id: str) -> Paper | None:
+        for paper in self._papers:
+            if paper.id == paper_id:
+                return paper
+        return None
+
+
 class RaisingSource:
     """A `Source` whose `search` raises — used to verify SearchService graceful merge."""
 

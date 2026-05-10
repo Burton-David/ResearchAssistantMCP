@@ -10,7 +10,7 @@ import pytest
 from research_mcp.domain.paper import Author, Paper
 from research_mcp.domain.query import SearchQuery
 from research_mcp.service import SearchService
-from tests.conftest import RaisingSource, StaticSource, UnavailableSource
+from tests.conftest import RaisingSource, ReturnAllSource, StaticSource, UnavailableSource
 
 pytestmark = pytest.mark.unit
 
@@ -265,3 +265,100 @@ async def test_provenance_single_source() -> None:
     outcome = await svc.search(SearchQuery(text="t"))
     [result] = outcome.results
     assert result.sources == ("arxiv",)
+
+
+# ---- reranker integration ----
+
+
+async def test_reranker_reorders_merged_candidates() -> None:
+    """When a reranker is configured, it sorts the merged pool by relevance
+    score before truncating to max_results."""
+    from research_mcp.reranker import FakeReranker
+
+    on_topic = Paper(
+        id="x:1",
+        title="cerium oxide single-atom platinum catalysis",
+        abstract="redox chemistry of CeO2 supported Pt",
+        authors=(Author("Datye"),),
+    )
+    off_topic = Paper(
+        id="x:2",
+        title="lattice quantum chromodynamics on the Fermilab grid",
+        abstract="heavy quark masses via lattice methods",
+        authors=(Author("Quigg"),),
+    )
+    src = ReturnAllSource("arxiv", [off_topic, on_topic])
+    svc = SearchService([src], reranker=FakeReranker())
+    outcome = await svc.search(
+        SearchQuery(text="platinum cerium catalysis chemistry", max_results=2)
+    )
+    assert len(outcome.results) == 2
+    # Reranker promotes on-topic (higher Jaccard against the chemistry query).
+    assert outcome.results[0].paper.id == "x:1"
+    assert outcome.results[1].paper.id == "x:2"
+
+
+async def test_lattice_qcd_regression_does_not_crowd_out_chemistry() -> None:
+    """Locks in the diagnostic agent's Phase B finding: arXiv's keyword ranker
+    put lattice-QCD physics papers atop a chemistry query because both shared
+    'lattice'. With a reranker scoring against the actual semantic intent,
+    the QCD paper drops out of the top-2."""
+    from research_mcp.reranker import FakeReranker
+
+    qcd = Paper(
+        id="arxiv:qcd",
+        title="Lattice QCD heavy quark masses",
+        abstract="lattice gauge theory heavy quark Fermilab method",
+        authors=(Author("Quigg"),),
+    )
+    chem_a = Paper(
+        id="arxiv:chem-a",
+        title="Single-atom platinum on cerium oxide",
+        abstract="CeO2 supported Pt single atoms catalyze CO oxidation",
+        authors=(Author("Datye"),),
+    )
+    chem_b = Paper(
+        id="arxiv:chem-b",
+        title="Lattice oxygen activation in CeO2 catalysis",
+        abstract="cerium oxide redox lattice oxygen single atom platinum",
+        authors=(Author("Hulva"),),
+    )
+    # Bi-encoder (i.e., upstream arXiv) order — pre-rerank — is whatever
+    # arXiv decides; ReturnAllSource preserves the input order so we can
+    # set up the test as "QCD is in slot 2 by relevance, and we don't want
+    # it in the top-2 after reranking."
+    src = ReturnAllSource("arxiv", [chem_b, qcd, chem_a])
+    svc = SearchService([src], reranker=FakeReranker())
+    outcome = await svc.search(
+        SearchQuery(
+            text="single-atom platinum cerium oxide catalysis chemistry",
+            max_results=2,
+        )
+    )
+    top_ids = {r.paper.id for r in outcome.results}
+    # Reranker should promote both chemistry papers above QCD.
+    assert "arxiv:qcd" not in top_ids, (
+        f"QCD paper should not be in top-2 after reranking; got {top_ids}"
+    )
+    assert top_ids == {"arxiv:chem-a", "arxiv:chem-b"}
+
+
+async def test_reranker_failure_falls_back_to_bi_encoder_order() -> None:
+    """A reranker exception must not lose the user's results — fall back to
+    bi-encoder (round-robin merge) ordering and surface the failure as a
+    partial."""
+
+    class _BrokenReranker:
+        name = "broken"
+
+        async def score(self, query, papers):  # type: ignore[no-untyped-def]
+            raise RuntimeError("pretend the model server died")
+
+    p1 = Paper(id="a:1", title="paper one", abstract="alpha", authors=())
+    p2 = Paper(id="a:2", title="paper two", abstract="alpha", authors=())
+    svc = SearchService([StaticSource("a", [p1, p2])], reranker=_BrokenReranker())
+    outcome = await svc.search(SearchQuery(text="paper", max_results=2))
+    # Results survive in bi-encoder order (StaticSource preserves input order).
+    assert [r.paper.id for r in outcome.results] == ["a:1", "a:2"]
+    # And the failure is surfaced.
+    assert any("reranker" in f and "broken" in f for f in outcome.partial_failures)
