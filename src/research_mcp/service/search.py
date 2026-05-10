@@ -38,6 +38,7 @@ from types import MappingProxyType
 from research_mcp.domain.paper import Author, Paper
 from research_mcp.domain.query import SearchQuery
 from research_mcp.domain.source import Source
+from research_mcp.errors import SourceUnavailable
 
 _log = logging.getLogger(__name__)
 
@@ -69,6 +70,21 @@ class SearchResult:
     sources: tuple[str, ...]
 
 
+@dataclass(frozen=True, slots=True)
+class SearchOutcome:
+    """Outcome of a `SearchService.search` call.
+
+    `partial_failures` carries human-readable per-source failure reasons
+    (e.g., `"arxiv: HTTP 429"`) so the LLM caller can distinguish
+    "no papers match" (empty `results`, empty `partial_failures`) from
+    "every source was rate-limited" (empty `results`, populated
+    `partial_failures`). Callers should generally retry on the latter.
+    """
+
+    results: list[SearchResult]
+    partial_failures: tuple[str, ...] = ()
+
+
 class SearchService:
     def __init__(self, sources: Sequence[Source]) -> None:
         if not sources:
@@ -79,15 +95,22 @@ class SearchService:
     def sources(self) -> tuple[Source, ...]:
         return self._sources
 
-    async def search(self, query: SearchQuery) -> list[SearchResult]:
+    async def search(self, query: SearchQuery) -> SearchOutcome:
         outcomes = await asyncio.gather(
             *(s.search(query) for s in self._sources),
             return_exceptions=True,
         )
         per_source: list[list[Paper]] = []
+        failures: list[str] = []
         for source, outcome in zip(self._sources, outcomes, strict=True):
+            if isinstance(outcome, SourceUnavailable):
+                failures.append(f"{outcome.source_name}: {outcome.short_reason()}")
+                _log.warning("source %r unavailable: %s", source.name, outcome.short_reason())
+                per_source.append([])
+                continue
             if isinstance(outcome, BaseException):
                 _log.warning("source %r raised %s; ignoring", source.name, outcome)
+                failures.append(f"{source.name}: unexpected {type(outcome).__name__}")
                 per_source.append([])
                 continue
             per_source.append(list(outcome))
@@ -127,10 +150,13 @@ class SearchService:
                 if len(merged) >= query.max_results:
                     break
 
-        return [
-            SearchResult(paper=p, sources=tuple(sorted(s)))
-            for p, s in zip(merged, contributors, strict=True)
-        ]
+        return SearchOutcome(
+            results=[
+                SearchResult(paper=p, sources=tuple(sorted(s)))
+                for p, s in zip(merged, contributors, strict=True)
+            ],
+            partial_failures=tuple(failures),
+        )
 
 
 def _merge_keys(paper: Paper) -> set[str]:

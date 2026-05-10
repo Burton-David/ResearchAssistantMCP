@@ -95,10 +95,12 @@ def build_namespace(*, force_fake: bool = False) -> dict[str, Any]:
     discovery = DiscoveryService(search)
 
     async def q(text: str, max_results: int = 10) -> list[Paper]:
-        results = await search.search(
+        outcome = await search.search(
             SearchQuery(text=text, max_results=max_results)
         )
-        return [r.paper for r in results]
+        if outcome.partial_failures:
+            print(f"⚠ partial failures: {outcome.partial_failures}")
+        return [r.paper for r in outcome.results]
 
     def cite(paper: Paper, fmt: str = "ama") -> str:
         return RENDERERS[CitationFormat(fmt)].render(paper)

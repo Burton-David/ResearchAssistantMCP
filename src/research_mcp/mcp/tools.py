@@ -158,6 +158,10 @@ class PaperSummary(BaseModel):
 
 class SearchPapersOutput(BaseModel):
     results: list[PaperSummary]
+    partial_failures: list[str] = []
+    """Per-source transient failures (e.g. ['arxiv: HTTP 429']). When this
+    is non-empty AND results is empty, the caller should retry rather than
+    treat it as 'no papers exist'."""
 
 
 class LibrarySearchHit(BaseModel):
@@ -215,6 +219,8 @@ class FindPaperOutput(BaseModel):
     note: str | None = None
     """Hint surfaced when the result is empty for a structural reason —
     e.g., the title was all stopwords and produced no Jaccard tokens."""
+    partial_failures: list[str] = []
+    """Per-source transient failures, same shape as SearchPapersOutput."""
 
 
 def paper_to_summary(paper: Paper, *, source: str = "") -> PaperSummary:

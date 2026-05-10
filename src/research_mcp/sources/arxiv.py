@@ -74,14 +74,10 @@ class ArxivSource:
             "sortBy": "relevance",
             "sortOrder": "descending",
         }
-        try:
-            body = await self._fetch(params)
-        except SourceUnavailable:
-            # Source contract requires `search` to degrade to an empty list on
-            # transient failures so partial results from other sources still
-            # flow through. `fetch` lets the exception propagate so callers
-            # can distinguish "id unknown" from "source unreachable."
-            return []
+        # Lets SourceUnavailable propagate per the updated Source contract.
+        # SearchService catches per-source so a 429 here doesn't kill the
+        # merged result, and surfaces the failure via partial_failures.
+        body = await self._fetch(params)
         return _parse_feed(body)
 
     async def fetch(self, paper_id: str) -> Paper | None:

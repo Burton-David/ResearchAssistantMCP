@@ -53,16 +53,18 @@ class RaisingSource:
 
 
 class UnavailableSource:
-    """A `Source` whose `fetch` raises `SourceUnavailable` — used to verify
-    that LibraryService.fetch propagates transient errors rather than
-    conflating them with 'id unknown'."""
+    """A `Source` whose `search` and `fetch` both raise `SourceUnavailable` —
+    models a rate-limited or unreachable upstream. Used to verify that
+    SearchService surfaces the failure via partial_failures and that
+    LibraryService.fetch propagates the exception instead of conflating
+    with 'id unknown'."""
 
     def __init__(self, name: str = "unavailable", reason: str = "simulated 429") -> None:
         self.name = name
         self._reason = reason
 
     async def search(self, query: SearchQuery) -> Sequence[Paper]:
-        return []
+        raise SourceUnavailable(self.name, self._reason)
 
     async def fetch(self, paper_id: str) -> Paper | None:
         raise SourceUnavailable(self.name, self._reason)

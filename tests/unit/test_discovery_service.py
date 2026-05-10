@@ -66,16 +66,14 @@ async def test_finds_canonical_paper_in_top_position() -> None:
         ],
     )
     discovery = DiscoveryService(SearchService([src]))
-    hits = await discovery.find_paper("Attention Is All You Need")
-    assert hits, "expected at least one candidate"
-    assert hits[0].paper.id == _vaswani().id
-    # Exact-title match should clear an obvious confidence threshold.
-    assert hits[0].confidence > 0.7
+    outcome = await discovery.find_paper("Attention Is All You Need")
+    assert outcome.hits, "expected at least one candidate"
+    assert outcome.hits[0].paper.id == _vaswani().id
+    assert outcome.hits[0].confidence > 0.7
+    assert outcome.partial_failures == ()
 
 
 async def test_author_match_breaks_tie_between_same_titled_papers() -> None:
-    """Two papers titled 'A Survey' by different first authors. The user
-    asks for the Smith one — author bonus pushes Smith above Jones."""
     smith_paper = Paper(
         id="x:smith",
         title="A Survey",
@@ -90,45 +88,55 @@ async def test_author_match_breaks_tie_between_same_titled_papers() -> None:
     )
     src = _ReturnAllSource("arxiv", [jones_paper, smith_paper])
     discovery = DiscoveryService(SearchService([src]))
-    hits = await discovery.find_paper("A Survey", authors=("Alice Smith",))
-    assert hits[0].paper.id == "x:smith"
-    assert hits[0].confidence > hits[1].confidence
+    outcome = await discovery.find_paper("A Survey", authors=("Alice Smith",))
+    assert outcome.hits[0].paper.id == "x:smith"
+    assert outcome.hits[0].confidence > outcome.hits[1].confidence
 
 
 async def test_returns_empty_for_blank_title() -> None:
     src = _ReturnAllSource("arxiv", [_vaswani()])
     discovery = DiscoveryService(SearchService([src]))
-    assert await discovery.find_paper("   ") == []
+    outcome = await discovery.find_paper("   ")
+    assert outcome.hits == []
 
 
 async def test_caps_at_three_results() -> None:
-    """The service returns at most 3 candidates regardless of upstream count."""
     decoys = [_decoy(f"Attention Variant {i}") for i in range(10)]
     src = _ReturnAllSource("arxiv", decoys)
     discovery = DiscoveryService(SearchService([src]))
-    hits = await discovery.find_paper("Attention Variant")
-    assert len(hits) <= 3
+    outcome = await discovery.find_paper("Attention Variant")
+    assert len(outcome.hits) <= 3
 
 
 async def test_zero_confidence_results_filtered_out() -> None:
-    """When nothing in the search results overlaps the title even minimally,
-    we don't surface noise."""
     src = _ReturnAllSource("arxiv", [_decoy("Quantum Cryptography in Bovine Lactation")])
     discovery = DiscoveryService(SearchService([src]))
-    # Search will return the decoy since StaticSource matches by substring;
-    # but the title-token Jaccard is 0, so it should be filtered.
-    hits = await discovery.find_paper("Attention Is All You Need")
-    assert hits == []
+    outcome = await discovery.find_paper("Attention Is All You Need")
+    assert outcome.hits == []
 
 
 async def test_empty_authors_list_works() -> None:
-    """Locks the 'authors=()' contract — find_paper must handle the no-author
-    case the same way as authors-supplied for the title-only ranking path."""
     src = _ReturnAllSource("arxiv", [_vaswani(), _decoy("Vision Transformers")])
     discovery = DiscoveryService(SearchService([src]))
-    hits = await discovery.find_paper("Attention Is All You Need", authors=())
-    assert hits, "expected at least one hit"
-    assert hits[0].paper.id == _vaswani().id
+    outcome = await discovery.find_paper("Attention Is All You Need", authors=())
+    assert outcome.hits, "expected at least one hit"
+    assert outcome.hits[0].paper.id == _vaswani().id
+
+
+async def test_partial_failures_pass_through_from_search() -> None:
+    """A find_paper call against a partially-down source-set surfaces the
+    upstream failures so the LLM client can decide between retry and
+    'no such paper'."""
+    from tests.conftest import UnavailableSource
+
+    src_a = UnavailableSource("arxiv", "HTTP 429")
+    src_b = _ReturnAllSource("semantic_scholar", [_vaswani()])
+    discovery = DiscoveryService(SearchService([src_a, src_b]))
+    outcome = await discovery.find_paper("Attention Is All You Need")
+    # Hit still surfaces from the live source.
+    assert outcome.hits[0].paper.id == _vaswani().id
+    # Failure from the dead source flows through.
+    assert any("arxiv" in f and "429" in f for f in outcome.partial_failures)
 
 
 def test_has_significant_tokens_predicate() -> None:

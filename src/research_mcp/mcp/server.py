@@ -197,7 +197,7 @@ def build_server(
 
     async def _do_search(arguments: dict[str, Any]) -> dict[str, Any]:
         args = SearchPapersInput.model_validate(arguments)
-        results = await search.search(
+        outcome = await search.search(
             SearchQuery(
                 text=args.query,
                 max_results=args.max_results,
@@ -208,8 +208,9 @@ def build_server(
         return SearchPapersOutput(
             results=[
                 paper_to_summary(r.paper, source="+".join(r.sources))
-                for r in results
-            ]
+                for r in outcome.results
+            ],
+            partial_failures=list(outcome.partial_failures),
         ).model_dump()
 
     async def _do_ingest(arguments: dict[str, Any]) -> dict[str, Any]:
@@ -276,11 +277,11 @@ def build_server(
 
     async def _do_find_paper(arguments: dict[str, Any]) -> dict[str, Any]:
         args = FindPaperInput.model_validate(arguments)
-        hits = await discovery.find_paper(
+        outcome = await discovery.find_paper(
             title=args.title, authors=tuple(args.authors)
         )
         note: str | None = None
-        if not hits:
+        if not outcome.hits:
             from research_mcp.service.discovery import has_significant_tokens
 
             if not has_significant_tokens(args.title):
@@ -294,9 +295,10 @@ def build_server(
                     paper=paper_to_summary(h.paper, source="+".join(h.sources)),
                     confidence=h.confidence,
                 )
-                for h in hits
+                for h in outcome.hits
             ],
             note=note,
+            partial_failures=list(outcome.partial_failures),
         ).model_dump()
 
     async def _do_get_paper(arguments: dict[str, Any]) -> dict[str, Any]:

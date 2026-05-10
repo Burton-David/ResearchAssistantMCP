@@ -49,6 +49,20 @@ class DiscoveryHit:
     confidence: float
 
 
+@dataclass(frozen=True, slots=True)
+class DiscoveryOutcome:
+    """Outcome of a `DiscoveryService.find_paper` call.
+
+    Mirrors `SearchOutcome` so partial-source-failure information flows
+    through the discovery layer too. An empty `hits` list with non-empty
+    `partial_failures` means "I couldn't search; try again", not "no
+    such paper".
+    """
+
+    hits: list[DiscoveryHit]
+    partial_failures: tuple[str, ...] = ()
+
+
 class DiscoveryService:
     def __init__(self, search: SearchService) -> None:
         self._search = search
@@ -57,10 +71,10 @@ class DiscoveryService:
         self,
         title: str,
         authors: tuple[str, ...] = (),
-    ) -> list[DiscoveryHit]:
+    ) -> DiscoveryOutcome:
         title = title.strip()
         if not title:
-            return []
+            return DiscoveryOutcome(hits=[])
 
         # Build the upstream query as bare title tokens plus author surnames.
         # arXiv's full-text search splits on whitespace and ranks by overall
@@ -74,7 +88,7 @@ class DiscoveryService:
                 query_parts.append(surname)
         query_text = " ".join(query_parts)
 
-        results = await self._search.search(
+        outcome = await self._search.search(
             SearchQuery(text=query_text, max_results=_PROBE_DEPTH)
         )
 
@@ -83,7 +97,7 @@ class DiscoveryService:
         target_surnames.discard("")
 
         scored: list[DiscoveryHit] = []
-        for result in results:
+        for result in outcome.results:
             hit_tokens = _title_tokens(result.paper.title)
             jaccard = _jaccard(target_tokens, hit_tokens)
             bonus = 0.0
@@ -105,7 +119,10 @@ class DiscoveryService:
             )
 
         scored.sort(key=lambda h: h.confidence, reverse=True)
-        return [h for h in scored[:_RESULT_LIMIT] if h.confidence > 0.0]
+        return DiscoveryOutcome(
+            hits=[h for h in scored[:_RESULT_LIMIT] if h.confidence > 0.0],
+            partial_failures=outcome.partial_failures,
+        )
 
 
 def _title_tokens(title: str) -> set[str]:

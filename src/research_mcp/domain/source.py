@@ -40,9 +40,13 @@ class Source(Protocol):
     async def search(self, query: SearchQuery) -> Sequence[Paper]:
         """Return papers matching the query. Empty sequence on no results.
 
-        Implementations should not raise on transient network errors — log
-        and return an empty sequence so partial results from other sources
-        still flow through.
+        May raise `SourceUnavailable` for transient failures — network
+        errors, HTTP 429/5xx, timeouts. Callers (SearchService) catch
+        these per-source and track them as `partial_failures` so an
+        empty merged result can be distinguished from an upstream
+        outage. Without this distinction, a rate-limited search looks
+        identical to "no papers exist" — a real UX failure caught by
+        the polish-batch verification.
         """
         ...
 
@@ -50,6 +54,8 @@ class Source(Protocol):
         """Fetch a single paper by canonical id. None if not found.
 
         `paper_id` is expected to carry the source prefix (`arxiv:2401.12345`).
-        Implementations should return None if the id doesn't belong to this source.
+        Return None if the id doesn't belong to this source (typically when
+        the prefix isn't in `id_prefixes`). Raise `SourceUnavailable` for
+        transient upstream failures.
         """
         ...

@@ -92,17 +92,25 @@ async def _search(query: str, max_results: int, source: str) -> None:
         sources.append(s2)
     try:
         svc = SearchService(sources)
-        results = await svc.search(SearchQuery(text=query, max_results=max_results))
-        if not results:
-            click.echo("No results.", err=True)
+        outcome = await svc.search(SearchQuery(text=query, max_results=max_results))
+        if not outcome.results:
+            if outcome.partial_failures:
+                click.echo(
+                    f"No results (sources unavailable: {', '.join(outcome.partial_failures)}).",
+                    err=True,
+                )
+            else:
+                click.echo("No results.", err=True)
             return
-        for hit in results:
+        for hit in outcome.results:
             paper = hit.paper
             source_label = "+".join(hit.sources)
             click.echo(f"{paper.id}\t[{source_label}]\t{paper.title}")
             snippet = paper.abstract[:200].replace("\n", " ")
             if snippet:
                 click.echo(f"    {snippet}{'...' if len(paper.abstract) > 200 else ''}")
+        for failure in outcome.partial_failures:
+            click.echo(f"(partial failure: {failure})", err=True)
     finally:
         if arxiv is not None:
             await arxiv.aclose()

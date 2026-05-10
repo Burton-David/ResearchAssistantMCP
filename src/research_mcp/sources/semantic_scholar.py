@@ -80,15 +80,13 @@ class SemanticScholarSource:
             lo = str(query.year_min) if query.year_min is not None else ""
             hi = str(query.year_max) if query.year_max is not None else ""
             params["year"] = f"{lo}-{hi}"
-        try:
-            body = await self._fetch("/paper/search", params)
-        except SourceUnavailable:
-            return []
+        # Lets SourceUnavailable propagate per the updated Source contract.
+        body = await self._fetch("/paper/search", params)
         try:
             payload = json.loads(body)
-        except json.JSONDecodeError:
+        except json.JSONDecodeError as exc:
             _log.exception("semantic scholar response not JSON")
-            return []
+            raise SourceUnavailable(self.name, "response was not JSON") from exc
         data = payload.get("data") or []
         return [paper for raw in data if (paper := _parse_paper(raw))]
 
