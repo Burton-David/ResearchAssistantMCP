@@ -523,3 +523,268 @@ def test_parse_search_payload_skips_unparseable_works() -> None:
 
 async def _no_sleep(seconds: float) -> None:
     return None
+
+
+# ---- citation graph: fetch_referenced / fetch_related ----
+
+
+def _neighbor_work(work_id: str, title: str) -> dict:
+    """Minimal OpenAlex Work payload — enough for `_parse_work` to succeed."""
+    return {
+        "id": f"https://openalex.org/{work_id}",
+        "title": title,
+        "publication_year": 2018,
+        "publication_date": "2018-06-01",
+        "cited_by_count": 100,
+        "authorships": [
+            {"author": {"display_name": "Test Author", "orcid": None}},
+        ],
+    }
+
+
+def _parent_with_neighbors(*, referenced: list[str], related: list[str]) -> dict:
+    """Vaswani-shaped parent fixture with arbitrary referenced/related lists."""
+    work = dict(_VASWANI_WORK)
+    work["referenced_works"] = [f"https://openalex.org/{w}" for w in referenced]
+    work["related_works"] = [f"https://openalex.org/{w}" for w in related]
+    return work
+
+
+def _routing_handler(
+    path_to_response: dict[str, httpx.Response],
+    *,
+    captured_paths: list[str] | None = None,
+) -> Callable[[httpx.Request], httpx.Response]:
+    """Build an httpx mock handler that dispatches by URL path.
+
+    Lets multi-fetch tests script per-path responses without juggling a
+    shared iterator. Unrouted paths return 404."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if captured_paths is not None:
+            captured_paths.append(request.url.path)
+        return path_to_response.get(
+            request.url.path,
+            httpx.Response(404, json={"error": "Not found."}),
+        )
+
+    return handler
+
+
+async def test_fetch_referenced_returns_referenced_papers(tmp_path: Path) -> None:
+    """Happy path: parent has referenced_works, each neighbor resolves cleanly,
+    returns Papers in the order they appeared in the parent's array."""
+    parent = _parent_with_neighbors(referenced=["W001", "W002"], related=[])
+    handler = _routing_handler(
+        {
+            "/works/W2626778328": _work_response(parent),
+            "/works/W001": _work_response(_neighbor_work("W001", "First Reference")),
+            "/works/W002": _work_response(_neighbor_work("W002", "Second Reference")),
+        }
+    )
+    src = _build_source(tmp_path, handler)
+    try:
+        referenced = await src.fetch_referenced(
+            "openalex:W2626778328", limit=10
+        )
+    finally:
+        await src.aclose()
+    assert [p.id for p in referenced] == ["openalex:W001", "openalex:W002"]
+    assert [p.title for p in referenced] == ["First Reference", "Second Reference"]
+
+
+async def test_fetch_referenced_respects_limit(tmp_path: Path) -> None:
+    """Caller asks for 2 of 5 — we stop fetching after 2 successful resolves
+    so we don't burn API quota on neighbors the caller will never see."""
+    parent = _parent_with_neighbors(
+        referenced=["W001", "W002", "W003", "W004", "W005"], related=[]
+    )
+    captured: list[str] = []
+    handler = _routing_handler(
+        {
+            "/works/W2626778328": _work_response(parent),
+            "/works/W001": _work_response(_neighbor_work("W001", "1")),
+            "/works/W002": _work_response(_neighbor_work("W002", "2")),
+            # W003-W005 deliberately unrouted — if we ever fetch them
+            # the routing handler returns 404 and they'd be visible in
+            # `captured` (assertion at the bottom catches that).
+        },
+        captured_paths=captured,
+    )
+    src = _build_source(tmp_path, handler)
+    try:
+        referenced = await src.fetch_referenced(
+            "openalex:W2626778328", limit=2
+        )
+    finally:
+        await src.aclose()
+    assert [p.id for p in referenced] == ["openalex:W001", "openalex:W002"]
+    requested_neighbors = [
+        p for p in captured if p.startswith("/works/W00") and p != "/works/W2626778328"
+    ]
+    assert requested_neighbors == ["/works/W001", "/works/W002"]
+
+
+async def test_fetch_referenced_skips_individual_neighbor_404(
+    tmp_path: Path,
+) -> None:
+    """A 404 on one referenced work shouldn't poison the batch — the
+    remaining neighbors still come back. (OpenAlex occasionally returns
+    404 for works that exist in the graph but have been merged or
+    de-duplicated.)"""
+    parent = _parent_with_neighbors(referenced=["W_GONE", "W_OK"], related=[])
+    handler = _routing_handler(
+        {
+            "/works/W2626778328": _work_response(parent),
+            # W_GONE deliberately unrouted → routing handler returns 404.
+            "/works/W_OK": _work_response(_neighbor_work("W_OK", "Survived")),
+        }
+    )
+    src = _build_source(tmp_path, handler)
+    try:
+        referenced = await src.fetch_referenced(
+            "openalex:W2626778328", limit=10
+        )
+    finally:
+        await src.aclose()
+    assert [p.id for p in referenced] == ["openalex:W_OK"]
+
+
+async def test_fetch_referenced_returns_empty_when_field_missing(
+    tmp_path: Path,
+) -> None:
+    """Many records don't carry `referenced_works` at all (older items,
+    non-citable types). Return empty rather than raising."""
+    parent = dict(_VASWANI_WORK)  # baseline fixture has no referenced_works
+    handler = _routing_handler(
+        {"/works/W2626778328": _work_response(parent)}
+    )
+    src = _build_source(tmp_path, handler)
+    try:
+        referenced = await src.fetch_referenced("openalex:W2626778328")
+    finally:
+        await src.aclose()
+    assert referenced == ()
+
+
+async def test_fetch_referenced_returns_empty_when_field_not_list(
+    tmp_path: Path,
+) -> None:
+    """Defensive: a malformed payload (referenced_works as a dict or string)
+    should return empty, not crash."""
+    parent = dict(_VASWANI_WORK)
+    parent["referenced_works"] = {"unexpected": "shape"}  # type: ignore[assignment]
+    handler = _routing_handler(
+        {"/works/W2626778328": _work_response(parent)}
+    )
+    src = _build_source(tmp_path, handler)
+    try:
+        referenced = await src.fetch_referenced("openalex:W2626778328")
+    finally:
+        await src.aclose()
+    assert referenced == ()
+
+
+async def test_fetch_referenced_returns_empty_for_non_claimable_prefix(
+    tmp_path: Path,
+) -> None:
+    """ArXiv- and S2-only ids aren't claimable by OpenAlex's resolver; the
+    method short-circuits without an HTTP call rather than burning a 404."""
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(500)
+
+    src = _build_source(tmp_path, handler)
+    try:
+        result = await src.fetch_referenced("arxiv:1706.03762")
+    finally:
+        await src.aclose()
+    assert result == ()
+    assert calls == 0
+
+
+async def test_fetch_referenced_returns_empty_when_parent_404(
+    tmp_path: Path,
+) -> None:
+    """Parent paper doesn't exist in OpenAlex → return empty, not raise."""
+    handler = _routing_handler({})  # everything 404s
+    src = _build_source(tmp_path, handler)
+    try:
+        result = await src.fetch_referenced("openalex:W9999999999")
+    finally:
+        await src.aclose()
+    assert result == ()
+
+
+async def test_fetch_referenced_propagates_parent_5xx_as_source_unavailable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Persistent 5xx on the parent fetch is a transient outage — surface
+    SourceUnavailable so the caller can show a retry hint, not silently
+    return empty (which would be indistinguishable from 'no references')."""
+    monkeypatch.setattr(
+        "research_mcp.sources._backoff.asyncio.sleep",
+        _no_sleep,
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(503, content=b"upstream busy")
+
+    src = _build_source(tmp_path, handler)
+    try:
+        with pytest.raises(SourceUnavailable) as exc_info:
+            await src.fetch_referenced("openalex:W2626778328")
+    finally:
+        await src.aclose()
+    assert exc_info.value.source_name == "openalex"
+
+
+async def test_fetch_referenced_with_doi_prefix_uses_doi_path(
+    tmp_path: Path,
+) -> None:
+    """The doi: prefix should hit /works/doi:<doi> (OpenAlex's DOI resolver)
+    rather than /works/<doi-as-bare-id>."""
+    captured: list[str] = []
+    parent = _parent_with_neighbors(referenced=["W001"], related=[])
+    handler = _routing_handler(
+        {
+            "/works/doi:10.65215/2q58a426": _work_response(parent),
+            "/works/W001": _work_response(_neighbor_work("W001", "Neighbor")),
+        },
+        captured_paths=captured,
+    )
+    src = _build_source(tmp_path, handler)
+    try:
+        referenced = await src.fetch_referenced(
+            "doi:10.65215/2q58a426", limit=10
+        )
+    finally:
+        await src.aclose()
+    assert len(referenced) == 1
+    assert "/works/doi:10.65215/2q58a426" in captured
+
+
+async def test_fetch_related_reads_related_works_field(tmp_path: Path) -> None:
+    """`fetch_related` shares the resolver with `fetch_referenced` — verify
+    it reads `related_works` (not `referenced_works`) by giving the parent
+    two disjoint arrays and asserting which ones come back."""
+    parent = _parent_with_neighbors(
+        referenced=["W_REF_ONLY"], related=["W_RELATED_1", "W_RELATED_2"]
+    )
+    handler = _routing_handler(
+        {
+            "/works/W2626778328": _work_response(parent),
+            "/works/W_REF_ONLY": _work_response(_neighbor_work("W_REF_ONLY", "ref")),
+            "/works/W_RELATED_1": _work_response(_neighbor_work("W_RELATED_1", "r1")),
+            "/works/W_RELATED_2": _work_response(_neighbor_work("W_RELATED_2", "r2")),
+        }
+    )
+    src = _build_source(tmp_path, handler)
+    try:
+        related = await src.fetch_related("openalex:W2626778328", limit=10)
+    finally:
+        await src.aclose()
+    assert [p.id for p in related] == ["openalex:W_RELATED_1", "openalex:W_RELATED_2"]
