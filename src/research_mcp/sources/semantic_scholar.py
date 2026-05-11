@@ -24,7 +24,7 @@ from research_mcp.domain.query import SearchQuery
 from research_mcp.errors import SourceUnavailable
 from research_mcp.sources._backoff import with_backoff
 from research_mcp.sources._cache import DiskCache
-from research_mcp.sources._rate_limit import RateLimiter
+from research_mcp.sources._rate_limit import AdaptiveRateLimiter
 
 _log = logging.getLogger(__name__)
 
@@ -35,10 +35,21 @@ _FIELDS: Final = (
 )
 _DEFAULT_CACHE_TTL_SECONDS: Final = 24 * 60 * 60
 _DEFAULT_TIMEOUT: Final = 30.0
-# Public tier: ~1 req/sec is the de-facto polite ceiling. Authenticated tier
-# permits more, but a single shared client doing serial calls is fine for now.
+# Per S2's 2025 release notes (https://github.com/allenai/s2-folks/
+# blob/main/API_RELEASE_NOTES.md):
+#   - Unauthenticated: 5,000 requests / 5 minutes, SHARED across all
+#     anonymous users. The shared-pool semantics mean even sub-RPS
+#     traffic can 429 if other users burn through the pool, so we
+#     hold to 1 RPS as a polite ceiling.
+#   - Authenticated (default new-key tier): 1 RPS on all endpoints.
+#     This is what the user lands in after key approval; bursting
+#     past it is the cause of the cascading 429s the chaos tests
+#     surfaced in prior rounds (we were running at 10 RPS — 10x
+#     the documented limit).
+# Higher tiers exist by application; the constructor accepts a
+# `min_interval_seconds` override for callers who've negotiated one.
 _DEFAULT_MIN_INTERVAL_NOAUTH: Final = 1.0
-_DEFAULT_MIN_INTERVAL_AUTH: Final = 0.1
+_DEFAULT_MIN_INTERVAL_AUTH: Final = 1.0
 
 
 class SemanticScholarSource:
@@ -60,6 +71,7 @@ class SemanticScholarSource:
         api_key: str | None = None,
         cache_dir: str | os.PathLike[str] | None = None,
         ttl_seconds: int = _DEFAULT_CACHE_TTL_SECONDS,
+        min_interval_seconds: float | None = None,
         client: httpx.AsyncClient | None = None,
     ) -> None:
         self._api_key = api_key if api_key is not None else os.environ.get("SEMANTIC_SCHOLAR_API_KEY")
@@ -69,8 +81,38 @@ class SemanticScholarSource:
             else Path.home() / ".cache" / "research-mcp" / "semantic_scholar"
         )
         self._cache = DiskCache(cache_path, ttl_seconds=ttl_seconds)
-        interval = _DEFAULT_MIN_INTERVAL_AUTH if self._api_key else _DEFAULT_MIN_INTERVAL_NOAUTH
-        self._rate = RateLimiter(interval)
+        # Resolve interval in priority order:
+        #   1. explicit constructor arg (programmatic override)
+        #   2. RESEARCH_MCP_S2_MIN_INTERVAL env var (for users on
+        #      negotiated higher tiers who don't want to fork code)
+        #   3. tier-default (1.0s for both with/without key — see
+        #      docstring rationale)
+        env_override = os.environ.get("RESEARCH_MCP_S2_MIN_INTERVAL")
+        if min_interval_seconds is not None:
+            interval = min_interval_seconds
+        elif env_override:
+            try:
+                interval = float(env_override)
+            except ValueError:
+                _log.warning(
+                    "RESEARCH_MCP_S2_MIN_INTERVAL=%r is not a float; "
+                    "falling back to default", env_override,
+                )
+                interval = (
+                    _DEFAULT_MIN_INTERVAL_AUTH if self._api_key
+                    else _DEFAULT_MIN_INTERVAL_NOAUTH
+                )
+        elif self._api_key:
+            interval = _DEFAULT_MIN_INTERVAL_AUTH
+        else:
+            interval = _DEFAULT_MIN_INTERVAL_NOAUTH
+        # AdaptiveRateLimiter learns from 429s. Empirically S2's free-
+        # tier "1 RPS" enforcement is tighter than documented: 4
+        # quick requests at 1.1s spacing produce a 429 on the 5th.
+        # Static interval can't recover from that; adaptive doubles
+        # on each 429 and decays back on success — same baseline (1.0s),
+        # but headroom when S2 is being strict.
+        self._rate = AdaptiveRateLimiter(interval)
         self._owns_client = client is None
         self._client = client or httpx.AsyncClient(timeout=_DEFAULT_TIMEOUT)
 
@@ -156,7 +198,12 @@ class SemanticScholarSource:
             )
 
         try:
-            response = await with_backoff(do_request, source_name=self.name)
+            response = await with_backoff(
+                do_request,
+                source_name=self.name,
+                on_throttled=self._rate.record_failure,
+                on_success=self._rate.record_success,
+            )
             # 404 = id unknown; let `fetch()` surface as None. Anything
             # else (5xx, 429 after retries, network error) is transient.
             if allow_404 and response.status_code == 404:

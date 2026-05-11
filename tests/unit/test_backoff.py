@@ -196,3 +196,92 @@ async def test_propagates_network_error_after_max_retries(
 async def _no_sleep(seconds: float) -> None:
     """Sleep replacement so tests run instantly."""
     return None
+
+
+async def test_calls_on_throttled_for_each_429(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AdaptiveRateLimiter wires record_failure to on_throttled. Verify
+    the callback fires on every 429 the response goes through, even
+    when the retry sequence eventually succeeds — so the rate limiter
+    learns from interim failures, not just terminal ones."""
+    monkeypatch.setattr("research_mcp.sources._backoff.asyncio.sleep", _no_sleep)
+    iterator = _scripted_responses([429, 429, 200])
+    throttled = 0
+    succeeded = 0
+
+    async def do_request() -> httpx.Response:
+        return next(iterator)
+
+    def on_throttled() -> None:
+        nonlocal throttled
+        throttled += 1
+
+    def on_success() -> None:
+        nonlocal succeeded
+        succeeded += 1
+
+    response = await with_backoff(
+        do_request,
+        source_name="test",
+        on_throttled=on_throttled,
+        on_success=on_success,
+    )
+    assert response.status_code == 200
+    assert throttled == 2  # two interim 429s
+    assert succeeded == 1  # one final 200
+
+
+async def test_calls_on_success_for_2xx_first_response(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("research_mcp.sources._backoff.asyncio.sleep", _no_sleep)
+    succeeded = 0
+
+    async def do_request() -> httpx.Response:
+        return _make_response(200)
+
+    def on_success() -> None:
+        nonlocal succeeded
+        succeeded += 1
+
+    await with_backoff(
+        do_request, source_name="test", on_success=on_success,
+    )
+    assert succeeded == 1
+
+
+async def test_does_not_call_on_success_for_terminal_429(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If we exhaust retries with 429s, on_throttled fired but
+    on_success did not — the limiter should keep its expanded
+    interval, not decay back."""
+    monkeypatch.setattr("research_mcp.sources._backoff.asyncio.sleep", _no_sleep)
+    iterator = _scripted_responses([429, 429, 429, 429])
+    throttled = 0
+    succeeded = 0
+
+    async def do_request() -> httpx.Response:
+        return next(iterator)
+
+    def on_throttled() -> None:
+        nonlocal throttled
+        throttled += 1
+
+    def on_success() -> None:
+        nonlocal succeeded
+        succeeded += 1
+
+    response = await with_backoff(
+        do_request,
+        source_name="test",
+        on_throttled=on_throttled,
+        on_success=on_success,
+    )
+    assert response.status_code == 429
+    # on_throttled fires on every 429 (including terminal) so the
+    # rate limiter learns from sustained throttling. on_success
+    # never fires because we never got a non-429 response.
+    assert throttled == 4
+    assert succeeded == 0

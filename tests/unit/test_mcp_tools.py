@@ -384,6 +384,58 @@ def test_source_from_id_routes_via_id_prefixes() -> None:
     assert source_from_id("isbn:9780123456", sources) == "isbn"
 
 
+def test_s2_authenticated_rate_limit_matches_documented_one_rps(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression guard. S2's documented authenticated-tier rate is
+    1 RPS (see s2-folks API_RELEASE_NOTES.md Jan 2025); a previous
+    default of 0.1s = 10 RPS caused cascading 429s in chaos tests.
+    Lock down: with an API key set, the rate-limiter interval is
+    exactly 1.0 second."""
+    from research_mcp.sources import SemanticScholarSource
+
+    monkeypatch.delenv("RESEARCH_MCP_S2_MIN_INTERVAL", raising=False)
+    src = SemanticScholarSource(api_key="sk-test")
+    assert src._rate.current_interval == pytest.approx(1.0)
+
+
+def test_s2_unauthenticated_rate_limit_is_polite_one_rps(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unauthenticated tier shares a 5,000-req/5-min pool with all
+    anonymous users; even sub-RPS traffic can 429 if others burn it.
+    We hold to 1 RPS as a conservative polite ceiling."""
+    from research_mcp.sources import SemanticScholarSource
+
+    monkeypatch.delenv("RESEARCH_MCP_S2_MIN_INTERVAL", raising=False)
+    monkeypatch.delenv("SEMANTIC_SCHOLAR_API_KEY", raising=False)
+    src = SemanticScholarSource()
+    assert src._rate.current_interval == pytest.approx(1.0)
+
+
+def test_s2_env_override_for_higher_negotiated_tier(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Users with an elevated S2 tier (negotiated separately) can opt
+    out of the conservative 1-RPS default via env var, without
+    needing to construct SemanticScholarSource by hand."""
+    from research_mcp.sources import SemanticScholarSource
+
+    monkeypatch.setenv("RESEARCH_MCP_S2_MIN_INTERVAL", "0.2")
+    src = SemanticScholarSource(api_key="sk-test")
+    assert src._rate.current_interval == pytest.approx(0.2)
+
+
+def test_s2_env_override_unparseable_falls_back_to_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from research_mcp.sources import SemanticScholarSource
+
+    monkeypatch.setenv("RESEARCH_MCP_S2_MIN_INTERVAL", "not-a-number")
+    src = SemanticScholarSource(api_key="sk-test")
+    assert src._rate.current_interval == pytest.approx(1.0)
+
+
 def test_source_id_prefixes_are_correct_on_real_adapters() -> None:
     """Lock down the prefix declarations on the live adapters.
 

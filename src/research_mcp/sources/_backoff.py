@@ -52,6 +52,8 @@ async def with_backoff(
     *,
     source_name: str,
     delays: tuple[float, ...] = _DEFAULT_DELAYS,
+    on_throttled: Callable[[], None] | None = None,
+    on_success: Callable[[], None] | None = None,
 ) -> httpx.Response:
     """Run `do_request()` with exponential backoff on retryable failures.
 
@@ -62,6 +64,11 @@ async def with_backoff(
 
     `delays` is the sequence of inter-attempt sleeps; total attempts =
     `len(delays) + 1`.
+
+    `on_throttled` / `on_success` are optional callbacks for an
+    AdaptiveRateLimiter to learn from the response. They fire when we
+    see a 429 (throttled — slow down) and when a request returns 2xx
+    or any non-retryable status (success — relax back toward baseline).
     """
     last_network_error: httpx.HTTPError | None = None
     last_response: httpx.Response | None = None
@@ -95,7 +102,11 @@ async def with_backoff(
             )
             continue
         if response.status_code not in _RETRYABLE_STATUS:
+            if on_success is not None:
+                on_success()
             return response
+        if response.status_code == 429 and on_throttled is not None:
+            on_throttled()
         last_response = response
         if attempt == len(delays):
             return response  # caller's raise_for_status will produce the error
