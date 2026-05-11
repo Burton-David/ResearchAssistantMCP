@@ -33,3 +33,9 @@ Thumbs.db
 *.faiss.json
 research_index/
 .cache/
+
+# Claude Code per-user settings. `.claude/settings.json` (if committed) is
+# the team-wide permission/conventions config; `.claude/settings.local.json`
+# is personal — bash allow-lists, automation knobs, etc. Keep it gitignored
+# so private permission grants don't leak to other contributors.
+.claude/settings.local.json
