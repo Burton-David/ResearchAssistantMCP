@@ -346,29 +346,51 @@ def _select_citation_scorer() -> CitationScorer:
     """Resolve `RESEARCH_MCP_CITATION_SCORER` to a CitationScorer instance.
 
     Formats:
-      * unset / "heuristic"           → HeuristicCitationScorer (default)
-      * "llm:openai:<model>"          → OpenAILLMCitationScorer wrapping heuristic
-      * "llm:anthropic:<model>"       → AnthropicLLMCitationScorer wrapping heuristic
+      * unset / "field_aware"  → FieldAwareCitationScorer(Heuristic)  (default)
+      * "heuristic"            → HeuristicCitationScorer (escape hatch — bare
+                                 heuristic, no field overrides; useful for
+                                 regression checks or callers that want the
+                                 pre-#2 scoring behavior verbatim)
+      * "llm:openai:<model>"   → OpenAILLMCitationScorer wrapping the field-
+                                 aware default (composition order is
+                                 inner=field, outer=LLM: the LLM relevance
+                                 multiplier acts on a field-adjusted base
+                                 score, not the bare heuristic)
+      * "llm:anthropic:<model>" → AnthropicLLMCitationScorer wrapping the
+                                  field-aware default (same shape)
 
-    LLM scorers compose on top of the heuristic — they adjust the total
-    by a semantic-relevance signal but never replace the four
-    data-grounded dimensions. Construction failures (missing API key,
-    missing extra) degrade to the heuristic with a warning so the
-    server still boots.
+    Construction failures (missing API key, missing extra) degrade to the
+    bare heuristic with a warning so the server still boots.
     """
     spec = os.environ.get("RESEARCH_MCP_CITATION_SCORER", "").strip()
-    if not spec or spec == "heuristic":
+    if not spec or spec == "field_aware":
+        from research_mcp.citation_scorer import FieldAwareCitationScorer
+
+        return FieldAwareCitationScorer(HeuristicCitationScorer())
+    if spec == "heuristic":
         return HeuristicCitationScorer()
     if spec.startswith("llm:"):
         return _build_llm_citation_scorer(spec[len("llm:"):])
     raise RuntimeError(
         f"RESEARCH_MCP_CITATION_SCORER={spec!r} not understood. "
-        "Use 'heuristic' or 'llm:openai:<model>' or 'llm:anthropic:<model>'."
+        "Use 'field_aware' (default), 'heuristic' (escape hatch), "
+        "'llm:openai:<model>', or 'llm:anthropic:<model>'."
     )
 
 
 def _build_llm_citation_scorer(spec: str) -> CitationScorer:
-    """Parse 'openai:<model>' or 'anthropic:<model>' into the right adapter."""
+    """Parse 'openai:<model>' or 'anthropic:<model>' into the right adapter.
+
+    LLM scorers wrap the field-aware default (not the bare heuristic) so
+    the LLM relevance multiplier composes with field-aware recency +
+    impact rather than overriding them. To bypass field-awareness in an
+    LLM-scored setup, set RESEARCH_MCP_CITATION_SCORER=heuristic and
+    construct the LLM scorer programmatically with base_scorer=
+    HeuristicCitationScorer().
+    """
+    from research_mcp.citation_scorer import FieldAwareCitationScorer
+
+    base = FieldAwareCitationScorer(HeuristicCitationScorer())
     provider, _, model = spec.partition(":")
     provider = provider.strip().lower()
     model = model.strip()
@@ -376,12 +398,16 @@ def _build_llm_citation_scorer(spec: str) -> CitationScorer:
         if provider == "openai":
             from research_mcp.citation_scorer import OpenAILLMCitationScorer
 
-            return OpenAILLMCitationScorer(model=model or "gpt-4o-mini")
+            return OpenAILLMCitationScorer(
+                model=model or "gpt-4o-mini",
+                base_scorer=base,
+            )
         if provider == "anthropic":
             from research_mcp.citation_scorer import AnthropicLLMCitationScorer
 
             return AnthropicLLMCitationScorer(
-                model=model or "claude-haiku-4-5-20251001"
+                model=model or "claude-haiku-4-5-20251001",
+                base_scorer=base,
             )
     except Exception as exc:  # pragma: no cover — env-specific
         _log.warning(
