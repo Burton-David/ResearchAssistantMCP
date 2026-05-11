@@ -30,6 +30,7 @@ def paper_to_dict(paper: Paper) -> dict[str, Any]:
         "semantic_scholar_id": paper.semantic_scholar_id,
         "pdf_url": paper.pdf_url,
         "full_text": paper.full_text,
+        "citation_count": paper.citation_count,
         "metadata": dict(paper.metadata),
     }
 
@@ -54,5 +55,6 @@ def paper_from_dict(d: dict[str, Any]) -> Paper:
         semantic_scholar_id=d.get("semantic_scholar_id"),
         pdf_url=d.get("pdf_url"),
         full_text=d.get("full_text"),
+        citation_count=d.get("citation_count"),
         metadata=metadata,
     )

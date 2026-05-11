@@ -1146,12 +1146,9 @@ async def run_default() -> None:
         _log.warning("no embedder configured: %s", _NO_EMBEDDER_HINT)
 
     async def paper_lookup(paper_id: str) -> Paper | None:
-        # fetch_with_enrichment runs the primary fetch via fetch_from_sources
-        # and then fans out best-effort metadata enrichment across the
-        # other configured sources, bounded by an 8s deadline. This is
-        # what fixes Vaswani-via-arxiv getting 35/100: arxiv has no
-        # citation_count or peer-reviewed venue; S2 does. After the fan-out
-        # the merged record carries both.
+        # See `fetch_with_enrichment` for why we go through it instead
+        # of `fetch_from_sources` directly: enrichment is what gets
+        # venue + citation_count onto arxiv-only records.
         return await fetch_with_enrichment(sources, paper_id)
 
     paper_analyzer = _select_paper_analyzer()
@@ -1214,12 +1211,9 @@ async def run_in_memory() -> None:
     # weights every test run.
 
     async def paper_lookup(paper_id: str) -> Paper | None:
-        # fetch_with_enrichment runs the primary fetch via fetch_from_sources
-        # and then fans out best-effort metadata enrichment across the
-        # other configured sources, bounded by an 8s deadline. This is
-        # what fixes Vaswani-via-arxiv getting 35/100: arxiv has no
-        # citation_count or peer-reviewed venue; S2 does. After the fan-out
-        # the merged record carries both.
+        # See `fetch_with_enrichment` for why we go through it instead
+        # of `fetch_from_sources` directly: enrichment is what gets
+        # venue + citation_count onto arxiv-only records.
         return await fetch_with_enrichment(sources, paper_id)
 
     test_mode_extractor = _select_claim_extractor()

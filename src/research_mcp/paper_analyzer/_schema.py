@@ -10,10 +10,15 @@ shaped to mirror `PaperAnalysis` so the analyzer's job is just
 from __future__ import annotations
 
 from collections.abc import Sequence
+from types import MappingProxyType
 from typing import Any, Final
 
 from research_mcp.domain.paper import Paper
-from research_mcp.domain.paper_analyzer import ALL_ANALYSIS_KINDS, AnalysisKind
+from research_mcp.domain.paper_analyzer import (
+    ALL_ANALYSIS_KINDS,
+    AnalysisKind,
+    PaperAnalysis,
+)
 
 # The schema that the LLM is asked to fill. `additionalProperties: false`
 # locks the output shape; both OpenAI's structured outputs and Anthropic's
@@ -181,3 +186,79 @@ def text_for_paper(paper: Paper) -> str:
     if paper.full_text:
         bits.append(paper.full_text.strip())
     return "\n\n".join(b for b in bits if b)
+
+
+def payload_to_analysis(
+    payload: dict[str, Any] | None,
+    *,
+    paper_id: str,
+    model_name: str,
+) -> PaperAnalysis:
+    """Lift the LLM's JSON output into the immutable domain object.
+
+    Shared by both `OpenAILLMPaperAnalyzer` and `AnthropicLLMPaperAnalyzer`
+    — the SDK call mechanics differ (response_format vs tool_use), but
+    the JSON shape is identical and the conversion is the same.
+    `metrics_reported` is a list of `{name, value}` pairs in the schema
+    (strict mode rejects open-ended additionalProperties); the parser
+    converts to a dict for the domain object.
+
+    Returns a blank-but-valid `PaperAnalysis` for any malformed input —
+    callers convert SDK errors / non-JSON content into this shape rather
+    than raising.
+    """
+    if not isinstance(payload, dict):
+        return PaperAnalysis(paper_id=paper_id, model=model_name)
+    cleaned_metrics = _metrics_from_pairs(payload.get("metrics_reported"))
+    return PaperAnalysis(
+        paper_id=paper_id,
+        summary=_pick_str(payload.get("summary")),
+        key_contributions=_pick_str_tuple(payload.get("key_contributions")),
+        methodology=_pick_str(payload.get("methodology")),
+        technical_approach=_pick_str(payload.get("technical_approach")),
+        limitations=_pick_str_tuple(payload.get("limitations")),
+        future_directions=_pick_str_tuple(payload.get("future_directions")),
+        datasets_used=_pick_str_tuple(payload.get("datasets_used")),
+        metrics_reported=MappingProxyType(cleaned_metrics),
+        baselines_compared=_pick_str_tuple(payload.get("baselines_compared")),
+        confidence=_pick_confidence(payload.get("confidence")),
+        model=model_name,
+    )
+
+
+def _pick_str(value: Any) -> str | None:
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    return None
+
+
+def _pick_str_tuple(value: Any) -> tuple[str, ...]:
+    if not isinstance(value, list):
+        return ()
+    return tuple(v.strip() for v in value if isinstance(v, str) and v.strip())
+
+
+def _pick_confidence(value: Any) -> float:
+    if isinstance(value, int | float):
+        return max(0.0, min(1.0, float(value)))
+    return 0.0
+
+
+def _metrics_from_pairs(value: Any) -> dict[str, float]:
+    """Convert `[{name, value}, ...]` from the LLM back to `{name: value}`.
+
+    The schema models metrics as a list of pairs because OpenAI strict
+    mode rejects `additionalProperties: <type>`; this is the inverse
+    conversion run on the LLM response payload.
+    """
+    if not isinstance(value, list):
+        return {}
+    out: dict[str, float] = {}
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        name = item.get("name")
+        val = item.get("value")
+        if isinstance(name, str) and name.strip() and isinstance(val, int | float):
+            out[name.strip()] = float(val)
+    return out

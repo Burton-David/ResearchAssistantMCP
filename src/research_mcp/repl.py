@@ -22,7 +22,6 @@ Convenience helpers exposed at top level:
 from __future__ import annotations
 
 import asyncio
-import logging
 import sys
 from typing import Any
 
@@ -41,8 +40,6 @@ from research_mcp.embedder import FakeEmbedder
 from research_mcp.index import MemoryIndex
 from research_mcp.service import DiscoveryService, LibraryService, SearchService
 from research_mcp.sources import ArxivSource, SemanticScholarSource
-
-_log = logging.getLogger(__name__)
 
 _BANNER_TEMPLATE = """\
 research-mcp REPL

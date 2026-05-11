@@ -18,8 +18,7 @@ import json
 import logging
 import os
 from collections.abc import Sequence
-from types import MappingProxyType
-from typing import Any, Final
+from typing import Final
 
 from openai import AsyncOpenAI
 
@@ -27,6 +26,7 @@ from research_mcp.domain.paper import Paper
 from research_mcp.domain.paper_analyzer import AnalysisKind, PaperAnalysis
 from research_mcp.paper_analyzer._schema import (
     ANALYSIS_SCHEMA,
+    payload_to_analysis,
     system_prompt,
     text_for_paper,
     user_prompt,
@@ -98,63 +98,4 @@ class OpenAILLMPaperAnalyzer:
         except json.JSONDecodeError:
             _log.exception("openai paper analyzer returned non-JSON content")
             return PaperAnalysis(paper_id=paper.id, model=self.name)
-        return _payload_to_analysis(parsed, paper_id=paper.id, model_name=self.name)
-
-
-def _payload_to_analysis(
-    payload: dict[str, Any], *, paper_id: str, model_name: str
-) -> PaperAnalysis:
-    """Lift the LLM's JSON output into the immutable domain object.
-
-    `metrics_reported` is shaped as a list of {name, value} pairs in
-    the schema (strict-mode requires that — see _schema.py); we
-    convert back to the dict-shaped domain field here.
-    """
-    cleaned_metrics = _metrics_from_pairs(payload.get("metrics_reported"))
-    return PaperAnalysis(
-        paper_id=paper_id,
-        summary=_pick_str(payload.get("summary")),
-        key_contributions=_pick_str_tuple(payload.get("key_contributions")),
-        methodology=_pick_str(payload.get("methodology")),
-        technical_approach=_pick_str(payload.get("technical_approach")),
-        limitations=_pick_str_tuple(payload.get("limitations")),
-        future_directions=_pick_str_tuple(payload.get("future_directions")),
-        datasets_used=_pick_str_tuple(payload.get("datasets_used")),
-        metrics_reported=MappingProxyType(cleaned_metrics),
-        baselines_compared=_pick_str_tuple(payload.get("baselines_compared")),
-        confidence=_pick_confidence(payload.get("confidence")),
-        model=model_name,
-    )
-
-
-def _pick_str(value: Any) -> str | None:
-    if isinstance(value, str) and value.strip():
-        return value.strip()
-    return None
-
-
-def _pick_str_tuple(value: Any) -> tuple[str, ...]:
-    if not isinstance(value, list):
-        return ()
-    return tuple(v.strip() for v in value if isinstance(v, str) and v.strip())
-
-
-def _pick_confidence(value: Any) -> float:
-    if isinstance(value, int | float):
-        return max(0.0, min(1.0, float(value)))
-    return 0.0
-
-
-def _metrics_from_pairs(value: Any) -> dict[str, float]:
-    """Convert [{name, value}, ...] from the LLM back to {name: value}."""
-    if not isinstance(value, list):
-        return {}
-    out: dict[str, float] = {}
-    for item in value:
-        if not isinstance(item, dict):
-            continue
-        name = item.get("name")
-        val = item.get("value")
-        if isinstance(name, str) and name.strip() and isinstance(val, int | float):
-            out[name.strip()] = float(val)
-    return out
+        return payload_to_analysis(parsed, paper_id=paper.id, model_name=self.name)

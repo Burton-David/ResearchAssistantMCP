@@ -83,7 +83,11 @@ class MemoryIndex:
         if not paper_ids:
             return
         async with self._lock:
-            keep = [i for i, pid in enumerate(self._ids) if pid not in set(paper_ids)]
+            # Build the lookup set once; doing it inside the comprehension
+            # rebuilt a set per iteration → O(n·m). Trivial at current
+            # sizes, but the kind of thing that bites later.
+            drop = set(paper_ids)
+            keep = [i for i, pid in enumerate(self._ids) if pid not in drop]
             self._ids = [self._ids[i] for i in keep]
             self._papers = [self._papers[i] for i in keep]
             self._matrix = self._matrix[keep] if keep else np.zeros(

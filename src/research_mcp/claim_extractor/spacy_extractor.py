@@ -89,7 +89,6 @@ class SpacyClaimExtractor:
                 suggested_search_terms=_search_terms_for(
                     doc, claim_type, start, end, self._context
                 ),
-                keywords=(),
             )
             raw_claims.append(claim)
         deduped = _dedup_claims(raw_claims)

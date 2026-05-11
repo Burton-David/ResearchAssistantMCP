@@ -1,8 +1,16 @@
 """Curated venue lists for the heuristic scorer.
 
-`TOP_VENUE_PATTERNS` matches strings (case-insensitive) that strongly
-imply a top-tier conference or journal. The list is conservative — we
-prefer to under-flag than over-credit a no-name workshop.
+Two pattern sets feed the venue dimension:
+
+  * `TOP_VENUE_PARTIAL_PATTERNS` — multi-word, distinctive substrings
+    that match via word-boundary regex. "ieee tpami" matches both
+    "IEEE TPAMI" and the full long-form name; "neural information
+    processing systems" matches the long-form NeurIPS string that
+    S2 returns on enrichment. Conservative — we'd rather under-flag
+    than over-credit a no-name workshop.
+  * `TOP_VENUE_EXACT_PATTERNS` — single-word or short tokens that
+    collide with common English ("science", "cell", "acl", "kdd").
+    Match against the whole stripped venue string only.
 
 `PREDATORY_PATTERNS` matches generic-sounding multi-discipline open-
 access journals that frequently appear on Beall's list updates. A
@@ -76,12 +84,6 @@ TOP_VENUE_EXACT_PATTERNS: frozenset[str] = frozenset(
         "acl", "kdd", "sigir", "rss", "icse",
         "stoc", "focs", "soda",
     }
-)
-
-# Backwards-compat alias kept so callers that imported the union name
-# still work; new code uses the two more-specific names above.
-TOP_VENUE_PATTERNS: frozenset[str] = (
-    TOP_VENUE_PARTIAL_PATTERNS | TOP_VENUE_EXACT_PATTERNS
 )
 
 # Common patterns in predatory venue names. Several are intentionally

@@ -24,7 +24,7 @@ researcher can see WHY a paper scored high or low.
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Protocol, runtime_checkable
@@ -90,21 +90,3 @@ class CitationScorer(Protocol):
         ...
 
 
-def batch_score_papers(
-    scorer: CitationScorer,
-    papers: Sequence[Paper],
-    claim: Claim | None = None,
-) -> Sequence[CitationQualityScore]:
-    """Convenience: score a sequence of papers serially.
-
-    Lives at the protocol layer because every caller will need it and
-    the trivial implementation belongs nowhere else. Implementations
-    that benefit from batching (an LLM scorer that can score 10 papers
-    in one prompt) can override this pattern in their own helper; the
-    plain protocol stays minimal.
-    """
-    raise NotImplementedError(
-        "Use [await scorer.score(p, claim) for p in papers] in async code; "
-        "this stub exists only to document the convention. Implementations "
-        "that batch will provide their own helper."
-    )

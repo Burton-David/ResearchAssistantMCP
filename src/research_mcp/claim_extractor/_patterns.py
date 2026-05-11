@@ -16,7 +16,7 @@ keeps the high-precision one.
 from __future__ import annotations
 
 import re
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterator
 
 from research_mcp.domain.claim import ClaimType
 
@@ -120,7 +120,3 @@ def iter_pattern_matches(
         for pattern in _compile(claim_type):
             for match in pattern.finditer(text):
                 yield claim_type, match
-
-
-def claim_types_iter() -> Iterable[ClaimType]:
-    return _PATTERNS_BY_TYPE.keys()

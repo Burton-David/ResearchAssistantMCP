@@ -60,3 +60,35 @@ def test_paper_codec_handles_metadata() -> None:
     )
     decoded = paper_from_dict(paper_to_dict(p))
     assert dict(decoded.metadata) == {"k": "v"}
+
+
+def test_paper_codec_preserves_citation_count() -> None:
+    """citation_count drives the heuristic scorer's impact dimension; if
+    the codec drops it, papers reloaded from FAISS lose enrichment and
+    score 35/100 instead of 70+. This was a real bug caught by the
+    code-quality review pass."""
+    p = Paper(
+        id="arxiv:1706.03762",
+        title="Attention",
+        abstract="...",
+        authors=(Author("Vaswani"),),
+        published=date(2017, 6, 12),
+        citation_count=175574,
+        venue="NeurIPS",
+    )
+    decoded = paper_from_dict(paper_to_dict(p))
+    assert decoded.citation_count == 175574
+    assert decoded.venue == "NeurIPS"
+
+
+def test_paper_codec_preserves_none_citation_count() -> None:
+    """The None case is distinct from 0 — Paper.citation_count=None
+    means 'this source didn't report it' (the scorer warns), while 0
+    means 'cited zero times' (the scorer dings impact). The codec
+    must keep them distinguishable across the roundtrip."""
+    p = Paper(
+        id="arxiv:9", title="t", abstract="", authors=(Author("X"),),
+        citation_count=None,
+    )
+    decoded = paper_from_dict(paper_to_dict(p))
+    assert decoded.citation_count is None

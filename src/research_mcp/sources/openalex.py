@@ -216,13 +216,21 @@ def _strip_openalex_id_url(value: Any) -> str | None:
 
 
 def _strip_doi_url(value: Any) -> str | None:
-    """`https://doi.org/10.x/y` → `10.x/y`. Handles http and https forms."""
+    """`https://doi.org/10.x/y` → `10.x/y`. Handles http and https forms.
+
+    DOIs are case-insensitive per the spec. We lower-case here so the
+    cross-source merge's `f"doi:{paper.doi.lower()}"` key matches
+    across all sources — OpenAlex sometimes returns mixed-case DOIs
+    that would otherwise miss the dedup hash.
+    """
     if not isinstance(value, str) or not value:
         return None
+    stripped = value
     for prefix in ("https://doi.org/", "http://doi.org/"):
-        if value.startswith(prefix):
-            return value.removeprefix(prefix) or None
-    return value or None
+        if stripped.startswith(prefix):
+            stripped = stripped.removeprefix(prefix)
+            break
+    return stripped.lower() or None
 
 
 def _reconstruct_abstract(inverted: dict[str, list[int]] | None) -> str:

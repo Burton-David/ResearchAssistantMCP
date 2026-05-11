@@ -81,7 +81,6 @@ class Claim:
 
     context: str
     suggested_search_terms: tuple[str, ...] = ()
-    keywords: tuple[str, ...] = ()
     start_char: int = 0
     end_char: int = 0
     metadata: Mapping[str, str] = field(

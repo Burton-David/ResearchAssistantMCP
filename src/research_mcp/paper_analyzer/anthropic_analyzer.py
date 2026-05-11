@@ -20,7 +20,6 @@ from __future__ import annotations
 import logging
 import os
 from collections.abc import Sequence
-from types import MappingProxyType
 from typing import Any, Final
 
 from anthropic import AsyncAnthropic
@@ -31,6 +30,7 @@ from research_mcp.paper_analyzer._schema import (
     ANALYSIS_SCHEMA,
     ANALYSIS_TOOL_DESCRIPTION,
     ANALYSIS_TOOL_NAME,
+    payload_to_analysis,
     system_prompt,
     text_for_paper,
     user_prompt,
@@ -77,25 +77,37 @@ class AnthropicLLMPaperAnalyzer:
         if not text_for_paper(paper):
             return PaperAnalysis(paper_id=paper.id, model=self.name)
 
-        response = await self._client.messages.create(
-            model=self.model,
-            max_tokens=self._max_tokens,
-            system=system_prompt(),
-            tools=[
-                {
-                    "name": ANALYSIS_TOOL_NAME,
-                    "description": ANALYSIS_TOOL_DESCRIPTION,
-                    "input_schema": ANALYSIS_SCHEMA,
-                }
-            ],
-            tool_choice={"type": "tool", "name": ANALYSIS_TOOL_NAME},
-            messages=[{"role": "user", "content": user_prompt(paper, kinds)}],
-        )
+        # Mirror the extractor pair's error handling: SDK retries are
+        # exhausted → log + return a blank PaperAnalysis so a transient
+        # Anthropic outage doesn't crash analyze_paper. Without this,
+        # the SDK exception propagated as-is — the MCP layer's
+        # call_tool wrapper does catch it eventually, but the user sees
+        # an opaque error rather than the "confidence=0, no analysis"
+        # shape the rest of the implementations agree on.
+        try:
+            response = await self._client.messages.create(
+                model=self.model,
+                max_tokens=self._max_tokens,
+                system=system_prompt(),
+                tools=[
+                    {
+                        "name": ANALYSIS_TOOL_NAME,
+                        "description": ANALYSIS_TOOL_DESCRIPTION,
+                        "input_schema": ANALYSIS_SCHEMA,
+                    }
+                ],
+                tool_choice={"type": "tool", "name": ANALYSIS_TOOL_NAME},
+                messages=[{"role": "user", "content": user_prompt(paper, kinds)}],
+            )
+        except Exception as exc:
+            _log.warning("anthropic paper analyzer call failed: %s", exc)
+            return PaperAnalysis(paper_id=paper.id, model=self.name)
+
         payload = _extract_tool_payload(response)
         if payload is None:
             _log.warning("anthropic analyzer returned no tool_use block")
             return PaperAnalysis(paper_id=paper.id, model=self.name)
-        return _payload_to_analysis(payload, paper_id=paper.id, model_name=self.name)
+        return payload_to_analysis(payload, paper_id=paper.id, model_name=self.name)
 
 
 def _extract_tool_payload(response: Any) -> dict[str, Any] | None:
@@ -115,61 +127,3 @@ def _extract_tool_payload(response: Any) -> dict[str, Any] | None:
             if isinstance(payload, dict):
                 return payload
     return None
-
-
-def _payload_to_analysis(
-    payload: dict[str, Any], *, paper_id: str, model_name: str
-) -> PaperAnalysis:
-    """Schema mirrors the OpenAI shape — `metrics_reported` is a list of
-    {name, value} pairs in the schema; we convert to a dict here."""
-    cleaned_metrics = _metrics_from_pairs(payload.get("metrics_reported"))
-    return PaperAnalysis(
-        paper_id=paper_id,
-        summary=_pick_str(payload.get("summary")),
-        key_contributions=_pick_str_tuple(payload.get("key_contributions")),
-        methodology=_pick_str(payload.get("methodology")),
-        technical_approach=_pick_str(payload.get("technical_approach")),
-        limitations=_pick_str_tuple(payload.get("limitations")),
-        future_directions=_pick_str_tuple(payload.get("future_directions")),
-        datasets_used=_pick_str_tuple(payload.get("datasets_used")),
-        metrics_reported=MappingProxyType(cleaned_metrics),
-        baselines_compared=_pick_str_tuple(payload.get("baselines_compared")),
-        confidence=_pick_confidence(payload.get("confidence")),
-        model=model_name,
-    )
-
-
-def _pick_str(value: Any) -> str | None:
-    if isinstance(value, str) and value.strip():
-        return value.strip()
-    return None
-
-
-def _pick_str_tuple(value: Any) -> tuple[str, ...]:
-    if not isinstance(value, list):
-        return ()
-    return tuple(v.strip() for v in value if isinstance(v, str) and v.strip())
-
-
-def _pick_confidence(value: Any) -> float:
-    if isinstance(value, int | float):
-        return max(0.0, min(1.0, float(value)))
-    return 0.0
-
-
-def _metrics_from_pairs(value: Any) -> dict[str, float]:
-    """Convert [{name, value}, ...] from the LLM back to {name: value}.
-
-    Mirrors the OpenAI parser; Anthropic's tool-use returns the same
-    schema shape so the conversion is identical."""
-    if not isinstance(value, list):
-        return {}
-    out: dict[str, float] = {}
-    for item in value:
-        if not isinstance(item, dict):
-            continue
-        name = item.get("name")
-        val = item.get("value")
-        if isinstance(name, str) and name.strip() and isinstance(val, int | float):
-            out[name.strip()] = float(val)
-    return out
