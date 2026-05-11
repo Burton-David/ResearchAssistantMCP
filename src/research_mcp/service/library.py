@@ -120,6 +120,13 @@ async def fetch_with_enrichment(
     if primary.semantic_scholar_id:
         candidates.append(f"s2:{primary.semantic_scholar_id}")
 
+    # Per-source enrichment budget. Tighter than the per-source search
+    # budget (25s) because enrichment is best-effort metadata-only — we
+    # already have the primary record, so a slow enrichment source is
+    # pure latency cost with no value. 5s covers a healthy S2 call;
+    # anything past that gives up silently.
+    per_source_budget = 5.0
+
     async def _enrich_via(source: Source) -> Paper | None:
         # Skip the source that already produced the primary — its disk
         # cache would just re-return the same record, and the merge
@@ -131,10 +138,12 @@ async def fetch_with_enrichment(
             if prefix not in source.id_prefixes:
                 continue
             try:
-                return await source.fetch(cand)
-            except SourceUnavailable:
-                # Best-effort enrichment: a flaky upstream just yields no
-                # extra metadata, never an error to the user.
+                return await asyncio.wait_for(
+                    source.fetch(cand), timeout=per_source_budget
+                )
+            except (SourceUnavailable, TimeoutError):
+                # Best-effort enrichment: a flaky or slow upstream just
+                # yields no extra metadata, never an error to the user.
                 return None
         return None
 

@@ -47,11 +47,19 @@ from research_mcp.domain.claim import Claim
 from research_mcp.domain.paper import Paper
 
 # Maximum points each dimension can contribute, summing to 100.
+# Per-dimension caps. Sum to 100 so `total` exactly equals
+# venue + impact + author + recency — no hidden residual band.
+# A previous version reserved 15 points for a never-implemented
+# cross-source-consensus dimension, which made the displayed
+# breakdown not reconcile with the total (chaos-test caught it:
+# 25+25+10+0=60 ≠ shown total 67.5). Dropped the residual and
+# redistributed those points to recency (the dimension that most
+# benefits from a wider range — strict 0→15 was too narrow for
+# field-aware decay we may add later).
 _VENUE_MAX: Final = 25.0
-_IMPACT_MAX: Final = 25.0
+_IMPACT_MAX: Final = 30.0
 _AUTHOR_MAX: Final = 20.0
-_RECENCY_MAX: Final = 15.0
-_RESIDUAL_MAX: Final = 15.0
+_RECENCY_MAX: Final = 25.0
 
 # Used by the recency dimension. After this many years a paper's
 # recency contribution decays to zero.
@@ -124,8 +132,7 @@ class HeuristicCitationScorer:
                 "unavailable; cross-source enrichment may not have resolved"
             )
 
-        residual = _RESIDUAL_MAX * 0.5  # neutral mid-band; weighted average rounds to 100
-        total = venue + impact + author + recency + residual
+        total = venue + impact + author + recency
 
         factors: Mapping[str, str] = MappingProxyType(
             {

@@ -110,7 +110,14 @@ class SemanticScholarSource:
         s2_id = _strip_prefix(paper_id)
         if s2_id is None:
             return None
-        body = await self._fetch(f"/paper/{s2_id}", {"fields": _FIELDS})
+        # 404 here means "this id doesn't exist in S2's index" — return
+        # None per the Source contract, NOT SourceUnavailable. Earlier
+        # we surfaced 404s as "semantic_scholar is unavailable, usually
+        # transient" which was misleading: a typo'd arxiv id would tell
+        # the user to retry instead of "no such paper."
+        body = await self._fetch_or_none(f"/paper/{s2_id}", {"fields": _FIELDS})
+        if body is None:
+            return None
         try:
             return _parse_paper(json.loads(body))
         except json.JSONDecodeError as exc:
@@ -118,7 +125,24 @@ class SemanticScholarSource:
             # A garbled body from S2 isn't an "id unknown"; treat as transient.
             raise SourceUnavailable(self.name, "response was not JSON") from exc
 
+    async def _fetch_or_none(
+        self, path: str, params: dict[str, str]
+    ) -> bytes | None:
+        """Like `_fetch` but returns None on 404 instead of raising."""
+        return await self._fetch_inner(path, params, allow_404=True)
+
     async def _fetch(self, path: str, params: dict[str, str]) -> bytes:
+        body = await self._fetch_inner(path, params, allow_404=False)
+        assert body is not None  # allow_404=False makes None impossible
+        return body
+
+    async def _fetch_inner(
+        self,
+        path: str,
+        params: dict[str, str],
+        *,
+        allow_404: bool,
+    ) -> bytes | None:
         cache_key = path + "?" + "&".join(f"{k}={v}" for k, v in sorted(params.items()))
         cached = self._cache.get(cache_key)
         if cached is not None:
@@ -133,6 +157,10 @@ class SemanticScholarSource:
 
         try:
             response = await with_backoff(do_request, source_name=self.name)
+            # 404 = id unknown; let `fetch()` surface as None. Anything
+            # else (5xx, 429 after retries, network error) is transient.
+            if allow_404 and response.status_code == 404:
+                return None
             response.raise_for_status()
         except httpx.HTTPError as exc:
             _log.warning("semantic scholar request failed for %s: %s", path, exc)

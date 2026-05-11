@@ -52,6 +52,15 @@ _RERANK_POOL_FACTOR = 5
 # responses around 100. Going past doesn't help quality and risks 429s.
 _MAX_RERANK_POOL = 50
 
+# Per-source wall-clock budget inside a parallel fan-out. With backoff
+# retries, a 429ing source could spend up to 4x30s + 7s of backoff =
+# ~127s before surfacing failure. asyncio.gather waits for ALL tasks,
+# so one slow source pinned the whole search at 127s — which broke
+# assist_draft inside its 180s tool budget. Capping each source at 25s
+# means a slow upstream contributes a partial_failure and the merge
+# proceeds with what came back from the responsive sources.
+_PER_SOURCE_TIMEOUT_SECONDS = 25.0
+
 _log = logging.getLogger(__name__)
 
 # Words that should not influence title-based dedup. Kept tiny on purpose;
@@ -145,8 +154,25 @@ class SearchService:
                 year_max=query.year_max,
                 authors=query.authors,
             )
+        # Wrap each source.search in its own wait_for so one slow source
+        # (S2 rate-limited, arxiv 5xx, etc.) doesn't stall the merge.
+        # asyncio.gather still waits for all to complete, but each task
+        # is bounded — a hung source returns TimeoutError which gets
+        # captured as a partial_failure below.
+        async def _bounded(source: Source) -> Sequence[Paper]:
+            try:
+                return await asyncio.wait_for(
+                    source.search(upstream_query),
+                    timeout=_PER_SOURCE_TIMEOUT_SECONDS,
+                )
+            except TimeoutError as exc:
+                raise SourceUnavailable(
+                    source.name,
+                    f"per-source budget exceeded ({_PER_SOURCE_TIMEOUT_SECONDS:.0f}s)",
+                ) from exc
+
         outcomes = await asyncio.gather(
-            *(s.search(upstream_query) for s in self._sources),
+            *(_bounded(s) for s in self._sources),
             return_exceptions=True,
         )
         per_source: list[list[Paper]] = []
