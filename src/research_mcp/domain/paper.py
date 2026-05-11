@@ -13,11 +13,17 @@ class Author:
     """An author of a paper.
 
     `affiliation` and `orcid` are optional because many sources don't reliably provide them.
+
+    `s2_id` is Semantic Scholar's stable per-author identifier (digit-string)
+    when the parsing source knows it. Used to fetch h-index via S2's
+    `/author/{id}` endpoint without paying a name-disambiguation round-trip;
+    other sources (arXiv, OpenAlex, PubMed) currently don't populate it.
     """
 
     name: str
     affiliation: str | None = None
     orcid: str | None = None
+    s2_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

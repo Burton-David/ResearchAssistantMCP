@@ -30,6 +30,7 @@ from pydantic import ValidationError
 from research_mcp import __version__
 from research_mcp.citation import RENDERERS
 from research_mcp.citation_scorer import HeuristicCitationScorer
+from research_mcp.citation_scorer._author import HIndexLookup
 from research_mcp.domain.citation import CitationFormat
 from research_mcp.domain.citation_scorer import CitationScorer
 from research_mcp.domain.claim import ClaimExtractor
@@ -365,7 +366,9 @@ def _select_paper_analyzer() -> PaperAnalyzer | None:
     )
 
 
-def _select_citation_scorer() -> CitationScorer:
+def _select_citation_scorer(
+    h_index_lookup: HIndexLookup | None = None,
+) -> CitationScorer:
     """Resolve `RESEARCH_MCP_CITATION_SCORER` to a CitationScorer instance.
 
     Formats:
@@ -382,6 +385,12 @@ def _select_citation_scorer() -> CitationScorer:
       * "llm:anthropic:<model>" → AnthropicLLMCitationScorer wrapping the
                                   field-aware default (same shape)
 
+    `h_index_lookup` is the S2 author-h-index callable (typically
+    `SemanticScholarSource.fetch_h_index`); both the heuristic and field-
+    aware layers receive it so the author dim resolves real h-indexes
+    instead of the placeholder. Passing None disables it cleanly — the
+    author dim falls back to the placeholder, matching pre-#1 behavior.
+
     Construction failures (missing API key, missing extra) degrade to the
     bare heuristic with a warning so the server still boots.
     """
@@ -389,11 +398,14 @@ def _select_citation_scorer() -> CitationScorer:
     if not spec or spec == "field_aware":
         from research_mcp.citation_scorer import FieldAwareCitationScorer
 
-        return FieldAwareCitationScorer(HeuristicCitationScorer())
+        return FieldAwareCitationScorer(
+            HeuristicCitationScorer(h_index_lookup=h_index_lookup),
+            h_index_lookup=h_index_lookup,
+        )
     if spec == "heuristic":
-        return HeuristicCitationScorer()
+        return HeuristicCitationScorer(h_index_lookup=h_index_lookup)
     if spec.startswith("llm:"):
-        return _build_llm_citation_scorer(spec[len("llm:"):])
+        return _build_llm_citation_scorer(spec[len("llm:"):], h_index_lookup)
     raise RuntimeError(
         f"RESEARCH_MCP_CITATION_SCORER={spec!r} not understood. "
         "Use 'field_aware' (default), 'heuristic' (escape hatch), "
@@ -401,7 +413,10 @@ def _select_citation_scorer() -> CitationScorer:
     )
 
 
-def _build_llm_citation_scorer(spec: str) -> CitationScorer:
+def _build_llm_citation_scorer(
+    spec: str,
+    h_index_lookup: HIndexLookup | None = None,
+) -> CitationScorer:
     """Parse 'openai:<model>' or 'anthropic:<model>' into the right adapter.
 
     LLM scorers wrap the field-aware default (not the bare heuristic) so
@@ -413,7 +428,10 @@ def _build_llm_citation_scorer(spec: str) -> CitationScorer:
     """
     from research_mcp.citation_scorer import FieldAwareCitationScorer
 
-    base = FieldAwareCitationScorer(HeuristicCitationScorer())
+    base = FieldAwareCitationScorer(
+        HeuristicCitationScorer(h_index_lookup=h_index_lookup),
+        h_index_lookup=h_index_lookup,
+    )
     provider, _, model = spec.partition(":")
     provider = provider.strip().lower()
     model = model.strip()
@@ -437,13 +455,13 @@ def _build_llm_citation_scorer(spec: str) -> CitationScorer:
             "LLM citation scorer construction failed (%s); falling back to heuristic",
             exc,
         )
-        return HeuristicCitationScorer()
+        return HeuristicCitationScorer(h_index_lookup=h_index_lookup)
     _log.warning(
         "RESEARCH_MCP_CITATION_SCORER=llm:%r not understood; "
         "supported providers: openai, anthropic. Falling back to heuristic.",
         spec,
     )
-    return HeuristicCitationScorer()
+    return HeuristicCitationScorer(h_index_lookup=h_index_lookup)
 
 
 def _select_claim_extractor() -> ClaimExtractor | None:
@@ -1376,7 +1394,13 @@ async def run_default() -> None:
 
     paper_analyzer = _select_paper_analyzer()
     claim_extractor = _select_claim_extractor()
-    citation_svc = CitationService(search=search, scorer=_select_citation_scorer())
+    # h-index lookup binds to S2's /author/<id> endpoint. The method is
+    # already async + cached + rate-limited; passing the bound method
+    # means the scorer doesn't have to know about S2 specifics.
+    citation_svc = CitationService(
+        search=search,
+        scorer=_select_citation_scorer(h_index_lookup=s2.fetch_h_index),
+    )
     draft_svc = (
         DraftService(extractor=claim_extractor, citation=citation_svc)
         if claim_extractor is not None

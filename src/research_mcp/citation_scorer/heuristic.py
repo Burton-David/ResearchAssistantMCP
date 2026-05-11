@@ -36,6 +36,8 @@ from collections.abc import Mapping
 from types import MappingProxyType
 from typing import Final
 
+from research_mcp.citation_scorer._author import HIndexLookup, score_authors
+from research_mcp.citation_scorer._field import Field
 from research_mcp.citation_scorer._venues import (
     ARXIV_CATEGORY_BOOST,
     PREDATORY_PATTERNS,
@@ -79,11 +81,21 @@ class HeuristicCitationScorer:
 
     name: str = "heuristic"
 
-    def __init__(self, *, now: _dt.date | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        now: _dt.date | None = None,
+        h_index_lookup: HIndexLookup | None = None,
+    ) -> None:
         # `now` is overridable for deterministic tests; production
         # constructs the scorer once at boot, so a fixed `now` would go
         # stale, but per-call freshness isn't worth a parameter.
         self._now = now or _dt.date.today()
+        # `h_index_lookup` is the bound S2 `fetch_h_index` method (or a
+        # test fake); None disables the h-index dim and falls back to the
+        # placeholder. The heuristic always uses Field.DEFAULT tiers —
+        # field-aware tier selection is the FieldAwareCitationScorer's job.
+        self._h_index_lookup = h_index_lookup
 
     async def score(
         self,
@@ -112,7 +124,9 @@ class HeuristicCitationScorer:
         warnings.extend(venue_warns)
         impact, impact_factor, impact_warns = _score_impact(paper, self._now)
         warnings.extend(impact_warns)
-        author, author_factor = _score_author(paper)
+        author, author_factor = await score_authors(
+            paper, Field.DEFAULT, self._h_index_lookup
+        )
         recency, recency_factor = _score_recency(paper, self._now)
 
         # Surface a warning when KEY metadata is missing so the user
@@ -251,20 +265,6 @@ def _score_impact(paper: Paper, now: _dt.date) -> tuple[float, str, list[str]]:
             f"(expected ~{_EXPECTED_CITATION_VELOCITY:.0f})."
         ),
         warnings,
-    )
-
-
-def _score_author(paper: Paper) -> tuple[float, str]:
-    """Placeholder. Real h-index integration arrives when we plumb
-    author metrics through from S2/OpenAlex."""
-    if not paper.authors:
-        return _AUTHOR_MAX * 0.5, "No author metadata available."
-    return (
-        _AUTHOR_MAX * 0.5,
-        (
-            f"{len(paper.authors)} author(s); h-index integration pending. "
-            "Author dimension uses a neutral baseline for now."
-        ),
     )
 
 
