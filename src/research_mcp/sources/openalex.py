@@ -117,6 +117,125 @@ class OpenAlexSource:
             _log.exception("openalex fetch response not JSON")
             raise SourceUnavailable(self.name, "response was not JSON") from exc
 
+    async def fetch_referenced(
+        self,
+        paper_id: str,
+        limit: int = 10,
+    ) -> Sequence[Paper]:
+        """Resolve OpenAlex's `referenced_works` for `paper_id` into Papers.
+
+        OpenAlex stores each work's outgoing citation list as an array of
+        OpenAlex work URLs. We fetch the parent, take up to `limit` items
+        from its `referenced_works`, and fan out individual `/works/{id}`
+        calls so callers receive fully-populated Paper records, not bare
+        ids. Returns a deterministic citation graph — these are the
+        papers the source paper actually cites.
+        """
+        return await self._fetch_graph_neighbors(
+            paper_id, field="referenced_works", limit=limit
+        )
+
+    async def fetch_related(
+        self,
+        paper_id: str,
+        limit: int = 10,
+    ) -> Sequence[Paper]:
+        """Resolve OpenAlex's `related_works` for `paper_id` into Papers.
+
+        Same fetch shape as `fetch_referenced` but reads `related_works`
+        — OpenAlex's similarity-neighborhood signal computed from topic-
+        vector overlap. Unlike `referenced_works` this isn't a citation
+        graph: a "related" paper need not be cited by the source paper
+        and vice versa. Treat results as "papers OpenAlex thinks are
+        adjacent" rather than ground truth.
+        """
+        return await self._fetch_graph_neighbors(
+            paper_id, field="related_works", limit=limit
+        )
+
+    async def _fetch_graph_neighbors(
+        self,
+        paper_id: str,
+        *,
+        field: str,
+        limit: int,
+    ) -> Sequence[Paper]:
+        """Shared resolver for `referenced_works` and `related_works` arrays.
+
+        Both fields on the work record are lists of OpenAlex work URLs;
+        the fan-out logic is identical, only the source field differs.
+        Individual fan-out failures (404 on a neighbor, JSON parse error,
+        retried 5xx) are dropped silently so a single bad neighbor doesn't
+        poison the batch.
+
+        Returns an empty tuple when:
+          * the parent id isn't claimable by OpenAlex (`arxiv:`, `s2:`, ...)
+          * the parent doesn't exist in OpenAlex (404)
+          * the requested field is absent, empty, or not a list
+
+        Parent-fetch transient errors (5xx after retries / network) propagate
+        as `SourceUnavailable` so the caller can surface a retry hint.
+        """
+        prefix, _, raw = paper_id.partition(":")
+        if prefix not in self.id_prefixes or not raw:
+            return ()
+        path = f"/works/{raw}" if prefix == "openalex" else f"/works/doi:{raw}"
+        parent_body = await self._fetch_or_none(path)
+        if parent_body is None:
+            return ()
+        try:
+            parent = json.loads(parent_body)
+        except json.JSONDecodeError as exc:
+            _log.exception("openalex parent fetch response not JSON")
+            raise SourceUnavailable(self.name, "response was not JSON") from exc
+        neighbor_urls = parent.get(field) or []
+        if not isinstance(neighbor_urls, list):
+            return ()
+        return await self._resolve_works(neighbor_urls, limit=limit)
+
+    async def _resolve_works(
+        self,
+        work_urls: Sequence[Any],
+        *,
+        limit: int,
+    ) -> Sequence[Paper]:
+        """Fan out `/works/{id}` fetches for an OpenAlex URL list.
+
+        Individual failures (404, JSON parse error, transient 5xx after
+        retries) are logged and skipped so a single bad neighbor doesn't
+        poison the batch.
+        """
+        papers: list[Paper] = []
+        for ref_url in work_urls:
+            if len(papers) >= limit:
+                break
+            if not isinstance(ref_url, str):
+                continue
+            ref_id = _strip_openalex_id_url(ref_url)
+            if not ref_id:
+                continue
+            try:
+                body = await self._fetch_or_none(f"/works/{ref_id}")
+            except SourceUnavailable as exc:
+                _log.warning(
+                    "openalex referenced-work fetch failed for %s: %s",
+                    ref_id, exc,
+                )
+                continue
+            if body is None:
+                continue
+            try:
+                raw = json.loads(body)
+            except json.JSONDecodeError:
+                _log.warning(
+                    "openalex referenced-work response not JSON for %s", ref_id,
+                )
+                continue
+            paper = _parse_work(raw)
+            if paper is not None:
+                papers.append(paper)
+        return tuple(papers)
+
     async def _fetch(self, path: str, params: dict[str, str] | None = None) -> bytes:
         return await self._fetch_inner(path, params, allow_404=False) or b""
 

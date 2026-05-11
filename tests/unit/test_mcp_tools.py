@@ -160,6 +160,32 @@ def test_explain_citation_input_schema_has_no_dollar_ref() -> None:
     assert "paper_id" in schema["properties"]
 
 
+def test_find_referenced_by_input_schema_has_no_dollar_ref() -> None:
+    """Same regression check as find_citations / explain_citation: the
+    generated JSON Schema must inline everything (no $ref into $defs)
+    or Claude Desktop's tool discovery silently drops the parameter
+    types."""
+    from research_mcp.mcp.tools import FindReferencedByInput
+
+    schema = FindReferencedByInput.model_json_schema()
+    serialized = str(schema)
+    assert "$ref" not in serialized
+    assert "$defs" not in serialized
+    assert "paper_id" in schema["properties"]
+    assert "max_results" in schema["properties"]
+
+
+def test_find_related_input_schema_has_no_dollar_ref() -> None:
+    from research_mcp.mcp.tools import FindRelatedInput
+
+    schema = FindRelatedInput.model_json_schema()
+    serialized = str(schema)
+    assert "$ref" not in serialized
+    assert "$defs" not in serialized
+    assert "paper_id" in schema["properties"]
+    assert "max_results" in schema["properties"]
+
+
 def test_find_citations_input_accepts_flat_claim_fields() -> None:
     """The flat-claim form is what the LLM clients now send. Anything
     that previously sent a nested `claim` object would 422 — that's

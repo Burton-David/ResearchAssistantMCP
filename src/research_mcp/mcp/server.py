@@ -67,6 +67,10 @@ from research_mcp.mcp.tools import (
     FindPaperHit,
     FindPaperInput,
     FindPaperOutput,
+    FindReferencedByInput,
+    FindReferencedByOutput,
+    FindRelatedInput,
+    FindRelatedOutput,
     GetPaperInput,
     GetPaperOutput,
     IngestPaperInput,
@@ -122,6 +126,13 @@ _TOOL_TIMEOUTS: Final[dict[str, float]] = {
     "explain_citation": 60.0,
     "analyze_paper": 90.0,
     "assist_draft": 180.0,
+    # Citation-graph tools: 1 parent fetch + N parallel-ish fan-out fetches
+    # against OpenAlex's polite pool (0.1s min interval per request). Cold
+    # cache for 10 refs is ~1-3s typical, comfortably inside this budget;
+    # the headroom absorbs one or two slow OpenAlex responses without a
+    # spurious tool-timeout error.
+    "find_referenced_by": 60.0,
+    "find_related": 60.0,
 }
 
 _CITATION_UNAVAILABLE_HINT = (
@@ -464,6 +475,7 @@ def build_server(
     citation_service: CitationService | None = None,
     analysis_service: AnalysisService | None = None,
     draft_service: DraftService | None = None,
+    openalex: OpenAlexSource | None = None,
 ) -> Server[Any, Any]:
     """Construct an MCP `Server` with the six research tools registered.
 
@@ -683,6 +695,33 @@ def build_server(
                     "messages as the pipeline runs."
                 ),
                 inputSchema=AssistDraftInput.model_json_schema(),
+            ),
+            mcp_types.Tool(
+                name="find_referenced_by",
+                description=(
+                    "Walk OpenAlex's outgoing citation graph: return up to "
+                    "`max_results` papers that the given paper cites. The "
+                    "source paper id must be OpenAlex- or DOI-prefixed "
+                    "(e.g. 'openalex:W2741809807', 'doi:10.1038/nature12373') "
+                    "because referenced_works is an OpenAlex-only signal — "
+                    "arXiv- and S2-only ids aren't supported. Requires "
+                    "RESEARCH_MCP_OPENALEX_EMAIL to be set; the tool refuses "
+                    "with a hint otherwise."
+                ),
+                inputSchema=FindReferencedByInput.model_json_schema(),
+            ),
+            mcp_types.Tool(
+                name="find_related",
+                description=(
+                    "Return OpenAlex's similarity-neighborhood for the given "
+                    "paper. Unlike `find_referenced_by`, this isn't a "
+                    "deterministic citation graph — `related_works` is "
+                    "computed by OpenAlex from topic-vector similarity, so "
+                    "treat results as 'papers OpenAlex thinks are adjacent' "
+                    "rather than 'papers this one cites'. Same prefix rules "
+                    "and email requirement as find_referenced_by."
+                ),
+                inputSchema=FindRelatedInput.model_json_schema(),
             ),
         ]
 
@@ -1034,6 +1073,58 @@ def build_server(
             paper=paper_to_summary(paper, source=source_from_id(paper.id, search.sources))
         ).model_dump()
 
+    async def _do_find_referenced_by(arguments: dict[str, Any]) -> dict[str, Any]:
+        if openalex is None:
+            raise ValueError(
+                "find_referenced_by unavailable: OpenAlex isn't configured. "
+                "Set RESEARCH_MCP_OPENALEX_EMAIL to enable it. The "
+                "referenced_works signal is OpenAlex-only — other sources "
+                "(arXiv, Semantic Scholar, PubMed) don't expose outgoing-"
+                "citation graphs through their public APIs."
+            )
+        args = FindReferencedByInput.model_validate(arguments)
+        try:
+            referenced = await openalex.fetch_referenced(
+                args.paper_id, limit=args.max_results
+            )
+        except SourceUnavailable as exc:
+            raise ValueError(
+                f"could not walk references for {args.paper_id!r}: "
+                f"{exc.source_name} is unavailable ({exc.short_reason()}). "
+                "This is usually transient — try again."
+            ) from exc
+        return FindReferencedByOutput(
+            results=[
+                paper_to_summary(p, source=source_from_id(p.id, search.sources))
+                for p in referenced
+            ],
+        ).model_dump()
+
+    async def _do_find_related(arguments: dict[str, Any]) -> dict[str, Any]:
+        if openalex is None:
+            raise ValueError(
+                "find_related unavailable: OpenAlex isn't configured. "
+                "Set RESEARCH_MCP_OPENALEX_EMAIL to enable it. The "
+                "related_works signal is OpenAlex-only."
+            )
+        args = FindRelatedInput.model_validate(arguments)
+        try:
+            related = await openalex.fetch_related(
+                args.paper_id, limit=args.max_results
+            )
+        except SourceUnavailable as exc:
+            raise ValueError(
+                f"could not find related works for {args.paper_id!r}: "
+                f"{exc.source_name} is unavailable ({exc.short_reason()}). "
+                "This is usually transient — try again."
+            ) from exc
+        return FindRelatedOutput(
+            results=[
+                paper_to_summary(p, source=source_from_id(p.id, search.sources))
+                for p in related
+            ],
+        ).model_dump()
+
     handlers: dict[str, Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]] = {
         "search_papers": _do_search,
         "ingest_paper": _do_ingest,
@@ -1047,6 +1138,8 @@ def build_server(
         "explain_citation": _do_explain_citation,
         "analyze_paper": _do_analyze_paper,
         "assist_draft": _do_assist_draft,
+        "find_referenced_by": _do_find_referenced_by,
+        "find_related": _do_find_related,
     }
 
     # validate_input=False bypasses the mcp SDK's strict jsonschema check so
@@ -1247,6 +1340,7 @@ async def run_default() -> None:
             else None
         ),
         draft_service=draft_svc,
+        openalex=openalex,
     )
     try:
         async with stdio_server() as (read_stream, write_stream):

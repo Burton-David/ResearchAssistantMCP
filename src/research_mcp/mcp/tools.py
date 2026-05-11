@@ -493,6 +493,72 @@ class ExplainCitationOutput(BaseModel):
     paper: PaperSummary
 
 
+# ---- find_referenced_by / find_related (OpenAlex citation graph) ----
+#
+# OpenAlex is the only configured source that exposes outgoing citation
+# graphs (`referenced_works`) and similarity neighborhoods (`related_works`).
+# These tools require RESEARCH_MCP_OPENALEX_EMAIL to be set; the handler
+# refuses with a hint otherwise. `paper_id` must be an OpenAlex- or DOI-
+# prefixed id — arxiv:/s2:/pmid: ids aren't claimed by OpenAlex's resolver.
+
+
+class FindReferencedByInput(_Strict):
+    paper_id: str = Field(
+        ...,
+        min_length=1,
+        description=(
+            "Source paper id. Must be OpenAlex- or DOI-prefixed "
+            "(e.g. 'openalex:W2741809807', 'doi:10.1038/nature12373'). "
+            "arXiv- and S2-only ids aren't supported because the "
+            "outgoing-citation graph is an OpenAlex-side signal."
+        ),
+    )
+    max_results: int = Field(
+        10, ge=1, le=50,
+        description=(
+            "Maximum referenced papers to return. OpenAlex commonly reports "
+            "20-100 references per modern paper; the first `max_results` are "
+            "returned in OpenAlex's order (which roughly tracks paper "
+            "ordering, not relevance)."
+        ),
+    )
+
+
+class FindReferencedByOutput(BaseModel):
+    results: list[PaperSummary]
+    partial_failures: list[str] = []
+    """Per-source transient failures encountered while fanning out the
+    individual `/works/{id}` calls. Currently always empty — individual
+    fan-out failures are dropped silently so partial results still
+    reach the caller — but kept on the schema for forward compatibility
+    with a future per-ref retry surface."""
+
+
+class FindRelatedInput(_Strict):
+    paper_id: str = Field(
+        ...,
+        min_length=1,
+        description=(
+            "Source paper id. Same prefix rules as find_referenced_by: "
+            "OpenAlex- or DOI-prefixed ids only."
+        ),
+    )
+    max_results: int = Field(
+        10, ge=1, le=50,
+        description=(
+            "Maximum related papers to return. OpenAlex's `related_works` "
+            "is a similarity-neighborhood signal computed by OpenAlex "
+            "(roughly: papers with overlapping topic vectors); unlike "
+            "referenced_works it isn't a deterministic citation graph."
+        ),
+    )
+
+
+class FindRelatedOutput(BaseModel):
+    results: list[PaperSummary]
+    partial_failures: list[str] = []
+
+
 # ---- analyze_paper ----
 
 AnalysisKindLiteral = Literal[
