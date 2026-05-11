@@ -1,0 +1,67 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Cancel in-flight runs for the same PR when a new commit lands — saves
+# minutes on rapid push cycles without changing what "green on the
+# latest commit" means.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: pytest + ruff + mypy
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install package + dev extras
+        # `paper-analysis` brings anthropic — needed because the
+        # citation_scorer / claim_extractor / paper_analyzer packages
+        # re-export the Anthropic adapters from `__init__.py` at module
+        # load time, so tests fail at collection without it.
+        #
+        # `claim-extraction` brings spacy — needed because the
+        # `_select_claim_extractor` wiring tests assert the default
+        # extractor is `SpacyClaimExtractor`. spacy returns None from
+        # the build helper without the model, so we also download
+        # `en_core_web_sm` (~13MB) in the next step.
+        #
+        # `sentence-transformers` (~700MB w/ torch) is intentionally
+        # left out — its heavy code paths are lazy-imported and the
+        # unit tests use Fake* implementations. The integration tests
+        # stay skipped behind RESEARCH_MCP_* env-var gates.
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev,paper-analysis,claim-extraction]"
+
+      - name: Download spaCy model
+        run: python -m spacy download en_core_web_sm
+
+      - name: ruff (lint)
+        run: ruff check src tests
+
+      - name: mypy (strict type-check)
+        # Strict mode is enforced by mypy.ini / pyproject.toml settings;
+        # we just run mypy and trust those.
+        run: mypy src
+
+      - name: pytest
+        # -q for quiet, --strict-markers so misspelled @pytest.mark.* fail
+        # loudly rather than silently skipping. Integration + reranker
+        # tests are gated by their own env vars and stay skipped.
+        run: pytest -q --strict-markers
