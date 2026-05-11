@@ -245,6 +245,42 @@ def test_parse_work_handles_missing_citation_count() -> None:
     assert p.citation_count is None
 
 
+def test_parse_work_surfaces_openalex_field_into_metadata() -> None:
+    """`primary_topic.field.display_name` lands in `metadata["openalex_field"]`
+    so the upcoming field-aware scorer can detect discipline for non-arXiv
+    sources. Without this, only arXiv-origin papers carry a field hint."""
+    work = dict(_VASWANI_WORK)
+    work["primary_topic"] = {
+        "id": "https://openalex.org/T11636",
+        "display_name": "Sequence-to-sequence translation",
+        "field": {
+            "id": "https://openalex.org/fields/17",
+            "display_name": "Computer Science",
+        },
+    }
+    p = _parse_work(work)
+    assert p is not None
+    assert p.metadata.get("openalex_field") == "Computer Science"
+
+
+def test_parse_work_omits_openalex_field_when_topic_block_missing() -> None:
+    """Many records lack `primary_topic`; metadata should be empty rather
+    than carrying a placeholder."""
+    p = _parse_work(_VASWANI_WORK)
+    assert p is not None
+    assert "openalex_field" not in p.metadata
+
+
+def test_parse_work_omits_openalex_field_when_field_display_name_missing() -> None:
+    """Defensive: a topic without a field block (or with a non-string
+    display_name) shouldn't crash or insert garbage."""
+    work = dict(_VASWANI_WORK)
+    work["primary_topic"] = {"id": "T1", "field": None}
+    p = _parse_work(work)
+    assert p is not None
+    assert "openalex_field" not in p.metadata
+
+
 # ---- end-to-end search/fetch via MockTransport ----
 
 

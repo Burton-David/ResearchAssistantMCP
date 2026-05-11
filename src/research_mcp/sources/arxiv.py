@@ -14,6 +14,7 @@ import os
 from collections.abc import Sequence
 from datetime import date, datetime
 from pathlib import Path
+from types import MappingProxyType
 from typing import Final
 from xml.etree import ElementTree as ET
 
@@ -175,6 +176,16 @@ def _parse_entry(entry: ET.Element) -> Paper | None:
             abs_url = href
     doi = entry.findtext("arxiv:doi", default=None, namespaces=_NS) or None
     journal = entry.findtext("arxiv:journal_ref", default=None, namespaces=_NS) or None
+    # `arxiv:primary_category` is an attribute-bearing element (`term="cs.LG"`);
+    # findtext can't reach attributes, so we fetch the element and read .get.
+    # Surfacing this into Paper.metadata feeds the field-aware scorer downstream;
+    # the heuristic scorer already has a dormant lookup for it.
+    meta: dict[str, str] = {}
+    primary_category_el = entry.find("arxiv:primary_category", _NS)
+    if primary_category_el is not None:
+        term = primary_category_el.get("term")
+        if term:
+            meta["arxiv_primary_category"] = term
     return Paper(
         id=f"arxiv:{arxiv_id}",
         title=" ".join(title.split()),
@@ -186,6 +197,7 @@ def _parse_entry(entry: ET.Element) -> Paper | None:
         doi=doi,
         arxiv_id=arxiv_id,
         pdf_url=pdf_url,
+        metadata=MappingProxyType(meta),
     )
 
 
