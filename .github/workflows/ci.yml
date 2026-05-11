@@ -1,0 +1,54 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Cancel in-flight runs for the same PR when a new commit lands — saves
+# minutes on rapid push cycles without changing what "green on the
+# latest commit" means.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: pytest + ruff + mypy
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install package + dev extras
+        # Optional extras (sentence-transformers, claim-extraction, paper-
+        # analysis) are intentionally not installed — those code paths are
+        # lazy-imported and gated tests skip when the import fails. Adds
+        # ~100MB of model downloads otherwise that don't earn their keep
+        # on every commit.
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: ruff (lint)
+        run: ruff check src tests
+
+      - name: mypy (strict type-check)
+        # Strict mode is enforced by mypy.ini / pyproject.toml settings;
+        # we just run mypy and trust those.
+        run: mypy src
+
+      - name: pytest
+        # -q for quiet, --strict-markers so misspelled @pytest.mark.* fail
+        # loudly rather than silently skipping. Integration + reranker
+        # tests are gated by their own env vars and stay skipped.
+        run: pytest -q --strict-markers
