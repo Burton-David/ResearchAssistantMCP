@@ -33,18 +33,24 @@ jobs:
         # `paper-analysis` brings anthropic — needed because the
         # citation_scorer / claim_extractor / paper_analyzer packages
         # re-export the Anthropic adapters from `__init__.py` at module
-        # load time. Tests importing those packages fail at collection
-        # otherwise. The anthropic SDK is small (~5MB).
+        # load time, so tests fail at collection without it.
         #
-        # `sentence-transformers` (~700MB w/ torch) and `claim-extraction`
-        # (spacy, plus the en_core_web_sm download) are intentionally
-        # left out — the heavy code paths there are lazy-imported and
-        # the unit tests that exercise them use Fake* implementations.
-        # Their integration tests stay skipped behind RESEARCH_MCP_*
-        # env-var gates.
+        # `claim-extraction` brings spacy — needed because the
+        # `_select_claim_extractor` wiring tests assert the default
+        # extractor is `SpacyClaimExtractor`. spacy returns None from
+        # the build helper without the model, so we also download
+        # `en_core_web_sm` (~13MB) in the next step.
+        #
+        # `sentence-transformers` (~700MB w/ torch) is intentionally
+        # left out — its heavy code paths are lazy-imported and the
+        # unit tests use Fake* implementations. The integration tests
+        # stay skipped behind RESEARCH_MCP_* env-var gates.
         run: |
           python -m pip install --upgrade pip
-          pip install -e ".[dev,paper-analysis]"
+          pip install -e ".[dev,paper-analysis,claim-extraction]"
+
+      - name: Download spaCy model
+        run: python -m spacy download en_core_web_sm
 
       - name: ruff (lint)
         run: ruff check src tests
