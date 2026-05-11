@@ -125,6 +125,101 @@ def test_ingest_paper_input_default_max_papers_when_query_given() -> None:
     assert parsed.max_papers == 20  # documented default
 
 
+def test_find_citations_input_schema_has_no_dollar_ref() -> None:
+    """Earlier rounds used `claim: _ClaimDescriptor` as a nested model.
+    Pydantic emitted that as a `$ref` into `$defs`, which Claude Desktop
+    didn't resolve — the LLM saw `claim` as untyped and sent a string,
+    server rejected with "Input should be a valid dictionary..." Both
+    tools were unreachable. Flat claim_text/claim_type/... fields avoid
+    the issue entirely. Lock down: the schema must not use `$ref`.
+    """
+    from research_mcp.mcp.tools import FindCitationsInput
+
+    schema = FindCitationsInput.model_json_schema()
+    # No $defs, no $ref anywhere in the rendered schema.
+    serialized = str(schema)
+    assert "$ref" not in serialized
+    assert "$defs" not in serialized
+    # Required top-level fields are flat.
+    assert "claim_text" in schema["properties"]
+    assert "claim_type" in schema["properties"]
+    assert "claim_context" in schema["properties"]
+    assert "claim_search_terms" in schema["properties"]
+
+
+def test_explain_citation_input_schema_has_no_dollar_ref() -> None:
+    """Same regression as find_citations — explain_citation was the
+    other tool dead at the schema layer."""
+    from research_mcp.mcp.tools import ExplainCitationInput
+
+    schema = ExplainCitationInput.model_json_schema()
+    serialized = str(schema)
+    assert "$ref" not in serialized
+    assert "$defs" not in serialized
+    assert "claim_text" in schema["properties"]
+    assert "paper_id" in schema["properties"]
+
+
+def test_find_citations_input_accepts_flat_claim_fields() -> None:
+    """The flat-claim form is what the LLM clients now send. Anything
+    that previously sent a nested `claim` object would 422 — that's
+    fine, it was already broken at the protocol layer."""
+    from research_mcp.mcp.tools import FindCitationsInput
+
+    parsed = FindCitationsInput.model_validate(
+        {
+            "claim_text": "Transformers outperform LSTMs",
+            "claim_type": "comparative",
+            "claim_search_terms": ["transformer", "LSTM"],
+            "k": 3,
+        }
+    )
+    assert parsed.claim_text == "Transformers outperform LSTMs"
+    assert parsed.claim_type == "comparative"
+    assert parsed.claim_search_terms == ["transformer", "LSTM"]
+    assert parsed.k == 3
+
+
+def test_paper_summary_exposes_citation_count() -> None:
+    """The codec preserves citation_count; the *surface model* must
+    expose it too, or callers can't observe the field. Chaos test
+    caught this — citation_count was on Paper but stripped by
+    PaperSummary, so the user couldn't tell whether enrichment landed."""
+    from research_mcp.domain.paper import Author, Paper
+    from research_mcp.mcp.tools import paper_to_summary
+
+    p = Paper(
+        id="arxiv:1706.03762",
+        title="x",
+        abstract="",
+        authors=(Author("V"),),
+        citation_count=175574,
+    )
+    summary = paper_to_summary(p)
+    assert summary.citation_count == 175574
+
+
+def test_ingest_paper_output_carries_newly_added_count() -> None:
+    """The chaos test caught a UX bug: ingesting an already-present
+    paper returned the same library_count, leaving the caller unsure
+    if anything happened. `newly_added` distinguishes new from
+    upsert-of-existing."""
+    from research_mcp.mcp.tools import IngestPaperOutput, PaperSummary
+
+    out = IngestPaperOutput(
+        ingested=[
+            PaperSummary(
+                id="x:1", title="t", abstract="", authors=[],
+                year=None, venue=None, url=None, pdf_url=None, doi=None,
+            ),
+        ],
+        newly_added=0,  # all upserts of already-present papers
+        library_count=17,
+    )
+    assert out.newly_added == 0
+    assert out.library_count == 17
+
+
 def test_ingest_paper_input_schema_carries_one_of_constraint() -> None:
     """Mutual exclusivity is enforced at TWO layers:
       - server: model_validator catches it post-parse;

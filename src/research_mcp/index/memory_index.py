@@ -97,6 +97,13 @@ class MemoryIndex:
     async def count(self) -> int:
         return len(self._papers)
 
+    async def contains(self, paper_ids: Sequence[str]) -> set[str]:
+        if not paper_ids:
+            return set()
+        async with self._lock:
+            present = set(self._ids)
+        return {pid for pid in paper_ids if pid in present}
+
 
 def _normalize(vec: npt.NDArray[np.float32]) -> npt.NDArray[np.float32]:
     norm = float(np.linalg.norm(vec))

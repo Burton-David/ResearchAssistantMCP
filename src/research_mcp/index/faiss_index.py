@@ -317,6 +317,27 @@ class FaissIndex:
         async with self._lock:
             return int(self._index.ntotal)
 
+    async def contains(self, paper_ids: Sequence[str]) -> set[str]:
+        """Return the subset of `paper_ids` already present in the SQLite sidecar.
+
+        Used by the ingest UX to distinguish "newly added" from
+        "upserted existing" — without this, the caller sees the same
+        library_count before and after an ingest of papers that were
+        already present and can't tell whether anything happened.
+        """
+        if not paper_ids:
+            return set()
+        # Single IN-clause query rather than N round trips. The
+        # parameter substitution is safe — paper_ids are validated by
+        # pydantic upstream.
+        placeholders = ",".join("?" * len(paper_ids))
+        async with self._lock:
+            cursor = self._conn().execute(
+                f"SELECT paper_id FROM papers WHERE paper_id IN ({placeholders})",
+                list(paper_ids),
+            )
+            return {row[0] for row in cursor.fetchall()}
+
     def close(self) -> None:
         # Close the bookkeeping connection used in __init__ / _reconcile_orphans.
         # Other threads' connections are closed by the GC when those threads exit.

@@ -48,3 +48,12 @@ class Index(Protocol):
     async def count(self) -> int:
         """Number of papers currently in the index."""
         ...
+
+    async def contains(self, paper_ids: Sequence[str]) -> set[str]:
+        """Return the subset of `paper_ids` already present in the index.
+
+        Lets ingest tooling distinguish "newly added" from "upserted
+        a record that was already there" without firing N count
+        queries. Implementations should answer in O(len(paper_ids)).
+        """
+        ...

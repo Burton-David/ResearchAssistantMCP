@@ -194,20 +194,25 @@ def _select_reranker() -> tuple[Reranker | None, str | None]:
     )
 
 
-def _claim_from_descriptor(desc: Any) -> Any:
-    """Convert a `_ClaimDescriptor` into a domain `Claim`.
+def _claim_from_args(args: Any) -> Any:
+    """Build a domain `Claim` from the flat claim_* fields on an input.
 
-    The MCP tool accepts a flat dict; the service wants the domain
-    type. Doing the conversion in one place keeps the handlers tight.
+    `find_citations` and `explain_citation` accept the claim as flat
+    parameters (claim_text, claim_type, claim_context, claim_search_
+    terms) rather than a nested object — nested objects surface as
+    $ref-style JSON schemas that some MCP clients (Claude Desktop
+    among them) don't resolve, leaving the LLM to send a bare string.
+    Flat is the LLM-tractable shape; this helper rebuilds the domain
+    Claim from the parsed input model.
     """
     from research_mcp.domain.claim import Claim, ClaimType
 
     return Claim(
-        text=desc.text,
-        type=ClaimType(desc.type),
+        text=args.claim_text,
+        type=ClaimType(args.claim_type),
         confidence=0.85,  # synthetic; user-supplied claims aren't extractor-scored
-        context=desc.context,
-        suggested_search_terms=tuple(desc.suggested_search_terms),
+        context=args.claim_context,
+        suggested_search_terms=tuple(args.claim_search_terms),
     )
 
 
@@ -653,7 +658,14 @@ def build_server(
         # query (top-N from search + batched embed/upsert).
         t_start = time.monotonic()
         partial_failures: list[str] = []
+        # For single-id mode we know the id up front and can pre-check
+        # presence. For query mode we don't know the ids until after
+        # the search, so the pre-check happens between search and bulk
+        # ingest. Either way, capturing the pre-state lets us report
+        # how many records were *new* (vs upserts of already-present
+        # papers), which is the signal the user actually cares about.
         if args.paper_id is not None:
+            already_present_pre = await library.contains([args.paper_id])
             paper = await library.ingest(args.paper_id)
             ingested: list[Paper] = [paper]
         else:
@@ -667,16 +679,20 @@ def build_server(
                 )
             )
             partial_failures = list(outcome.partial_failures)
+            result_ids = [r.paper.id for r in outcome.results]
+            already_present_pre = await library.contains(result_ids)
             ingested = list(
                 await library.bulk_ingest([r.paper for r in outcome.results])
             )
         t_after_ingest = time.monotonic()
+        newly_added = sum(1 for p in ingested if p.id not in already_present_pre)
         count = await library.count()
         t_after_count = time.monotonic()
         _log.info(
-            "ingest_paper mode=%s n=%d ingest_ms=%.0f count_ms=%.0f",
+            "ingest_paper mode=%s n=%d new=%d ingest_ms=%.0f count_ms=%.0f",
             "id" if args.paper_id else "query",
             len(ingested),
+            newly_added,
             (t_after_ingest - t_start) * 1000,
             (t_after_count - t_after_ingest) * 1000,
         )
@@ -687,6 +703,7 @@ def build_server(
                 )
                 for p in ingested
             ],
+            newly_added=newly_added,
             library_count=count,
             partial_failures=partial_failures,
         ).model_dump()
@@ -796,7 +813,7 @@ def build_server(
         if citation_service is None:
             raise ValueError(_CITATION_UNAVAILABLE_HINT)
         args = FindCitationsInput.model_validate(arguments)
-        claim = _claim_from_descriptor(args.claim)
+        claim = _claim_from_args(args)
         candidates = await citation_service.find_citations(claim, k=args.k)
         return FindCitationsOutput(
             candidates=[
@@ -814,7 +831,7 @@ def build_server(
             raise ValueError(_CITATION_UNAVAILABLE_HINT)
         args = ExplainCitationInput.model_validate(arguments)
         paper = await _resolve_paper(args.paper_id, paper_lookup)
-        claim = _claim_from_descriptor(args.claim)
+        claim = _claim_from_args(args)
         explanation = await citation_service.explain_citation(paper, claim)
         score = await citation_service.score_citation(paper, claim)
         return ExplainCitationOutput(

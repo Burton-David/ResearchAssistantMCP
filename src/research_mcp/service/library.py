@@ -300,6 +300,12 @@ class LibraryService:
     async def count(self) -> int:
         return await self._index.count()
 
+    async def contains(self, paper_ids: Sequence[str]) -> set[str]:
+        """Subset of `paper_ids` already in the index — surfaces the
+        UX distinction between "newly added" and "upsert of existing"
+        that bare upsert semantics lose."""
+        return await self._index.contains(paper_ids)
+
 
 def _embedding_text(paper: Paper) -> str:
     pieces = [paper.title, paper.abstract]

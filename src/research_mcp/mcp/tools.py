@@ -208,6 +208,12 @@ class PaperSummary(BaseModel):
     url: str | None
     pdf_url: str | None
     doi: str | None
+    citation_count: int | None = None
+    """How many other works have cited this paper, per the source that
+    populated it. None = unknown (e.g., arxiv-only record without
+    cross-source enrichment, or no source reports it); 0 = "cited
+    zero times". Drives the heuristic citation scorer's impact
+    dimension and the 'score reflects missing metadata' warning."""
     source: str = ""
     """Adapters that contributed metadata, joined with '+' if multiple
     (e.g. 'arxiv', 'semantic_scholar', 'arxiv+semantic_scholar')."""
@@ -246,9 +252,17 @@ class LibrarySearchOutput(BaseModel):
 
 class IngestPaperOutput(BaseModel):
     ingested: list[PaperSummary]
-    """The papers actually added to the index. For single-paper ingest,
-    a list of length 1. For query-mode ingest, up to `max_papers`."""
+    """The papers we processed in this call. Length 1 for single-paper
+    mode, up to `max_papers` for query mode."""
+    newly_added: int
+    """How many of `ingested` were NOT already in the index. The other
+    `len(ingested) - newly_added` were updates of records already
+    present (FAISS upsert semantics). Without this signal, callers
+    see library_count unchanged after re-ingesting an existing paper
+    and can't tell whether anything happened."""
     library_count: int
+    """Total papers in the index AFTER this ingest. Equal to the
+    pre-call count + newly_added."""
     partial_failures: list[str] = []
     """Per-source transient failures, populated only in query-mode."""
 
@@ -371,47 +385,42 @@ class ExtractClaimsOutput(BaseModel):
     so the LLM caller knows the precision tier of these claims."""
 
 
-# ---- find_citations / score_citation / explain_citation ----
-
-
-class _ClaimDescriptor(_Strict):
-    """Inline claim description for citation tools that take a claim
-    directly. Mirrors the `Claim` domain object's surface, minus the
-    char offsets which only matter when the claim was extracted from
-    text the caller is showing back to the user."""
-
-    text: NonBlankStr = Field(..., description="The verbatim claim text.")
-    type: ClaimTypeLiteral = Field(
-        "factual",
-        description=(
-            "Claim type: drives downstream search-term emphasis "
-            "and explanation phrasing."
-        ),
-    )
-    context: str = Field(
-        "",
-        max_length=_MAX_DRAFT_CHARS,
-        description="Surrounding sentence/paragraph for disambiguation.",
-    )
-    suggested_search_terms: list[str] = Field(
-        default_factory=list,
-        max_length=20,
-        description="Keywords the citation finder uses as the upstream query.",
-    )
-
-    @field_validator("text")
-    @classmethod
-    def _text_not_blank(cls, value: str) -> str:
-        return _reject_blank(value)
+# ---- find_citations / explain_citation ----
+#
+# Claim parameters are FLAT (claim_text, claim_type, ...) rather than
+# nested under a `claim: object`. Pydantic's `model_json_schema` emits
+# nested models as `$ref` into a sibling `$defs` block. Several MCP
+# clients — Claude Desktop included — don't resolve `$ref` cleanly
+# when rendering tool inputs to the LLM, so the model saw `claim` as
+# untyped and passed a bare string. The server then rejected with
+# "Input should be a valid dictionary..." and the tool was unreachable.
+# Flat fields produce a schema with no $ref, every parameter is a
+# scalar/array/string, and the LLM has no path to misroute.
 
 
 class FindCitationsInput(_Strict):
-    claim: _ClaimDescriptor = Field(
-        ...,
+    claim_text: NonBlankStr = Field(
+        ..., description="Verbatim claim text (the thing needing a citation)."
+    )
+    claim_type: ClaimTypeLiteral = Field(
+        "factual",
         description=(
-            "Claim to find citations for. Pass the output of "
-            "extract_claims's claims[i] verbatim, or hand-craft a claim "
-            "object when working from a single sentence."
+            "Claim type — drives search-term emphasis and explanation "
+            "phrasing. One of: statistical, methodological, comparative, "
+            "theoretical, causal, factual, evaluative."
+        ),
+    )
+    claim_context: str = Field(
+        "",
+        max_length=_MAX_DRAFT_CHARS,
+        description="Surrounding sentence or paragraph for disambiguation.",
+    )
+    claim_search_terms: list[str] = Field(
+        default_factory=list,
+        max_length=20,
+        description=(
+            "Keywords the citation finder uses as the upstream query "
+            "(typically noun chunks from the claim's context)."
         ),
     )
     k: int = Field(
@@ -419,11 +428,10 @@ class FindCitationsInput(_Strict):
         description="How many candidate citations to return.",
     )
 
-
-# score_citation was dropped from the public tool surface during
-# consolidation. `explain_citation` already returns the full
-# `CitationQualityScoreSummary` inside its output — users who want
-# only the score can call explain_citation and read the .score field.
+    @field_validator("claim_text")
+    @classmethod
+    def _claim_text_not_blank(cls, value: str) -> str:
+        return _reject_blank(value)
 
 
 class ExplainCitationInput(_Strict):
@@ -432,9 +440,28 @@ class ExplainCitationInput(_Strict):
         min_length=1,
         description="Canonical paper id (e.g. 'arxiv:1706.03762').",
     )
-    claim: _ClaimDescriptor = Field(
-        ..., description="The claim this paper would be cited for."
+    claim_text: NonBlankStr = Field(
+        ..., description="Verbatim claim text this paper would be cited for."
     )
+    claim_type: ClaimTypeLiteral = Field(
+        "factual",
+        description="Claim type. See find_citations for the enum values.",
+    )
+    claim_context: str = Field(
+        "",
+        max_length=_MAX_DRAFT_CHARS,
+        description="Surrounding sentence or paragraph for disambiguation.",
+    )
+    claim_search_terms: list[str] = Field(
+        default_factory=list,
+        max_length=20,
+        description="Search keywords associated with the claim.",
+    )
+
+    @field_validator("claim_text")
+    @classmethod
+    def _claim_text_not_blank(cls, value: str) -> str:
+        return _reject_blank(value)
 
 
 class CitationQualityScoreSummary(BaseModel):
@@ -587,6 +614,7 @@ def paper_to_summary(paper: Paper, *, source: str = "") -> PaperSummary:
         url=paper.url,
         pdf_url=paper.pdf_url,
         doi=paper.doi,
+        citation_count=paper.citation_count,
         source=source,
     )
 
