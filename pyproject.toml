@@ -84,6 +84,27 @@ strict = true
 warn_unused_ignores = true
 warn_redundant_casts = true
 
+# Optional runtime dependencies — lazy-imported inside the modules that
+# use them, with try/except ImportError so a fresh checkout without the
+# extra installed still imports the package. CI installs only the `dev`
+# extra to keep the build cheap; without these overrides mypy errors on
+# the import lines themselves (strict mode's "cannot find implementation
+# or library stub" check). When the extras ARE installed locally, mypy
+# resolves the real types — the override is a graceful-degradation
+# fallback for CI, not a blanket Any cast.
+[[tool.mypy.overrides]]
+module = [
+    "anthropic",
+    "anthropic.*",
+    "sentence_transformers",
+    "sentence_transformers.*",
+    "spacy",
+    "spacy.*",
+    "defusedxml",
+    "defusedxml.*",
+]
+ignore_missing_imports = true
+
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
