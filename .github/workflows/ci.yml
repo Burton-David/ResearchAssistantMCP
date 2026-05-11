@@ -30,14 +30,21 @@ jobs:
           cache-dependency-path: pyproject.toml
 
       - name: Install package + dev extras
-        # Optional extras (sentence-transformers, claim-extraction, paper-
-        # analysis) are intentionally not installed — those code paths are
-        # lazy-imported and gated tests skip when the import fails. Adds
-        # ~100MB of model downloads otherwise that don't earn their keep
-        # on every commit.
+        # `paper-analysis` brings anthropic — needed because the
+        # citation_scorer / claim_extractor / paper_analyzer packages
+        # re-export the Anthropic adapters from `__init__.py` at module
+        # load time. Tests importing those packages fail at collection
+        # otherwise. The anthropic SDK is small (~5MB).
+        #
+        # `sentence-transformers` (~700MB w/ torch) and `claim-extraction`
+        # (spacy, plus the en_core_web_sm download) are intentionally
+        # left out — the heavy code paths there are lazy-imported and
+        # the unit tests that exercise them use Fake* implementations.
+        # Their integration tests stay skipped behind RESEARCH_MCP_*
+        # env-var gates.
         run: |
           python -m pip install --upgrade pip
-          pip install -e ".[dev]"
+          pip install -e ".[dev,paper-analysis]"
 
       - name: ruff (lint)
         run: ruff check src tests
