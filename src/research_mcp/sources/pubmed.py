@@ -178,7 +178,16 @@ class PubMedSource:
         cache_key = path + "?" + "&".join(f"{k}={v}" for k, v in sorted(params.items()))
         cached = self._cache.get(cache_key)
         if cached is not None:
-            return cached
+            # Re-validate cached bodies. NCBI sometimes returns 200 OK
+            # with `esearchresult.ERROR` set (backend outage, throttled,
+            # malformed query). The previous version cached those for
+            # 24 hours and returned silent empty results forever after.
+            # Hit-time validation lets a stale failure self-heal: an
+            # invalid cached body is treated as a miss and re-fetched.
+            error = _detect_pubmed_error(cached)
+            if error is None:
+                return cached
+            _log.info("pubmed cache hit had ERROR (%s); refetching", error)
         await self._rate.acquire()
 
         async def do_request() -> httpx.Response:
@@ -193,6 +202,17 @@ class PubMedSource:
             _log.warning("pubmed request failed for %s: %s", path, scrubbed)
             raise SourceUnavailable(self.name, scrubbed) from exc
         body = response.content
+        # E-utilities returns 200 OK + ERROR JSON for backend failures
+        # instead of a proper 5xx. Surface it as a transient SourceUnavailable
+        # (so it lands in partial_failures and the user sees it), and do
+        # NOT cache — the 24-hour TTL would otherwise persist the failure
+        # past the upstream recovery.
+        error = _detect_pubmed_error(body)
+        if error is not None:
+            _log.warning("pubmed returned 200 OK with ERROR body: %s", error)
+            raise SourceUnavailable(
+                self.name, f"upstream backend error: {error}"
+            )
         self._cache.set(cache_key, body)
         return body
 
@@ -212,6 +232,38 @@ def _build_term(query: SearchQuery) -> str:
     for author in query.authors:
         parts.append(f'"{author}"[Author]')
     return " AND ".join(parts) if parts else "*"
+
+
+def _detect_pubmed_error(body: bytes) -> str | None:
+    """Inspect an esearch JSON body for NCBI's 200-OK-with-ERROR shape.
+
+    NCBI returns a 200 OK + JSON body with `esearchresult.ERROR` set
+    when the backend service is unavailable, the query is malformed,
+    or the database is misconfigured. Examples seen in the wild:
+        "Search Backend failed: Couldn't resolve #pmquerysrv-mz..."
+        "Database is not supported: pubmed"
+    Returns the error message if present, else None. Non-JSON or
+    non-esearch bodies (efetch XML, etc.) return None — efetch's
+    failure mode is HTTP-level and handled by the HTTPError branch.
+    """
+    if not body:
+        return None
+    # efetch returns XML; quick prefix check avoids parsing it as JSON.
+    if body.lstrip().startswith(b"<"):
+        return None
+    try:
+        payload = json.loads(body)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    result = payload.get("esearchresult")
+    if not isinstance(result, dict):
+        return None
+    error = result.get("ERROR")
+    if isinstance(error, str) and error.strip():
+        return error.strip()
+    return None
 
 
 def _parse_esearch_idlist(body: bytes, *, source_name: str) -> list[str]:

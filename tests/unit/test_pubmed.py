@@ -486,6 +486,158 @@ async def _no_sleep(seconds: float) -> None:
 # ---- input round-trip ----
 
 
+def test_detect_pubmed_error_finds_backend_failure() -> None:
+    """The actual NCBI 200-OK-with-ERROR body that broke metformin
+    search for ~12 hours during a chaos test session, frozen as a
+    test fixture so this regression can't return undetected."""
+    from research_mcp.sources.pubmed import _detect_pubmed_error
+
+    body = (
+        b'{"header":{"type":"esearch","version":"0.3"},'
+        b'"esearchresult":{"ERROR":"Search Backend failed: Couldn\'t '
+        b'resolve #pmquerysrv-mz?dbaf=pubmed, the address table is empty."}}'
+    )
+    error = _detect_pubmed_error(body)
+    assert error is not None
+    assert "Search Backend failed" in error
+
+
+def test_detect_pubmed_error_finds_database_not_supported() -> None:
+    """Second NCBI failure mode caught in the same cache audit."""
+    from research_mcp.sources.pubmed import _detect_pubmed_error
+
+    body = (
+        b'{"header":{"type":"esearch","version":"0.3"},'
+        b'"esearchresult":{"ERROR":"Database is not supported: pubmed"}}'
+    )
+    assert _detect_pubmed_error(body) == "Database is not supported: pubmed"
+
+
+def test_detect_pubmed_error_passes_normal_response() -> None:
+    """Healthy esearch JSON with an idlist must not be flagged as
+    an error — false positives would break successful searches."""
+    from research_mcp.sources.pubmed import _detect_pubmed_error
+
+    body = (
+        b'{"header":{"type":"esearch","version":"0.3"},'
+        b'"esearchresult":{"count":"3","retmax":"3","retstart":"0",'
+        b'"idlist":["12345","67890","11111"]}}'
+    )
+    assert _detect_pubmed_error(body) is None
+
+
+def test_detect_pubmed_error_ignores_xml_efetch_bodies() -> None:
+    """efetch returns XML; the ERROR detector must not waste time
+    trying to parse it as JSON."""
+    from research_mcp.sources.pubmed import _detect_pubmed_error
+
+    body = b'<?xml version="1.0"?><PubmedArticleSet></PubmedArticleSet>'
+    assert _detect_pubmed_error(body) is None
+
+
+def test_detect_pubmed_error_handles_empty_or_garbage_body() -> None:
+    from research_mcp.sources.pubmed import _detect_pubmed_error
+
+    assert _detect_pubmed_error(b"") is None
+    assert _detect_pubmed_error(b"not json") is None
+
+
+async def test_search_raises_source_unavailable_on_ncbi_backend_error(
+    tmp_path: Path,
+) -> None:
+    """End-to-end regression: NCBI returns 200 OK with ERROR JSON;
+    PubMedSource raises SourceUnavailable instead of silently
+    returning [] and caching the failure. Mirrors the chaos-test bug
+    where metformin search showed 0 PubMed results with empty
+    partial_failures for 12+ hours after a transient NCBI outage."""
+    error_body = (
+        b'{"header":{"type":"esearch"},'
+        b'"esearchresult":{"ERROR":"Search Backend failed: '
+        b'address table is empty."}}'
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=error_body)
+
+    src = _build_source(tmp_path, handler)
+    try:
+        with pytest.raises(SourceUnavailable, match="upstream backend error"):
+            await src.search(SearchQuery(text="metformin", max_results=5))
+    finally:
+        await src.aclose()
+
+
+async def test_error_response_is_not_cached(tmp_path: Path) -> None:
+    """The bug's persistence vector: a 200-with-ERROR response was
+    cached for 24 hours, so the failure outlived the upstream's
+    recovery. Verify that error responses bypass the cache write."""
+    calls = 0
+    error_body = (
+        b'{"esearchresult":{"ERROR":"Search Backend failed"}}'
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(200, content=error_body)
+
+    src = _build_source(tmp_path, handler)
+    try:
+        # First call raises and does NOT cache the error.
+        with pytest.raises(SourceUnavailable):
+            await src.search(SearchQuery(text="metformin", max_results=5))
+        # Second call must hit the network again (not return cached error).
+        with pytest.raises(SourceUnavailable):
+            await src.search(SearchQuery(text="metformin", max_results=5))
+    finally:
+        await src.aclose()
+    assert calls == 2  # both calls actually went out — error wasn't cached
+
+
+async def test_stale_cached_error_self_heals_on_next_call(
+    tmp_path: Path,
+) -> None:
+    """If an OLDER server version cached an error body before this fix
+    shipped, the next call must treat the cache hit as a miss and
+    re-fetch. Otherwise users running the fix still see 12-hour-old
+    silent failures until the cache TTL expires."""
+    from research_mcp.sources._cache import DiskCache
+
+    error_body = (
+        b'{"esearchresult":{"ERROR":"Search Backend failed"}}'
+    )
+    good_body = (
+        b'{"esearchresult":{"idlist":["12345"]}}'
+    )
+
+    # Pre-populate the cache with the stale error response.
+    cache_dir = tmp_path / "cache"
+    cache = DiskCache(cache_dir, ttl_seconds=24 * 60 * 60)
+    # Cache key shape: see PubMedSource._fetch.
+    key = (
+        "/esearch.fcgi?"
+        "db=pubmed&email=test@example.com&retmax=5&retmode=json&"
+        "sort=relevance&term=metformin&tool=research-mcp"
+    )
+    cache.set(key, error_body)
+
+    sequence = iter([good_body, _SAMPLE_PUBMED_XML])
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("esearch.fcgi"):
+            return httpx.Response(200, content=next(sequence))
+        return httpx.Response(200, content=_SAMPLE_PUBMED_XML)
+
+    src = _build_source(tmp_path, handler)
+    try:
+        results = await src.search(SearchQuery(text="metformin", max_results=5))
+    finally:
+        await src.aclose()
+    # The stale ERROR cache entry was bypassed; the fresh esearch +
+    # efetch came through normally.
+    assert len(results) == 1
+
+
 def test_esearch_idlist_parser_handles_extra_fields() -> None:
     """NCBI sometimes returns idlist alongside warning/error blocks; the
     parser should pick out the ids and ignore the rest."""
