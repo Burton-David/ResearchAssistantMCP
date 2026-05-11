@@ -20,7 +20,7 @@ import logging
 import os
 import time
 from collections.abc import Awaitable, Callable
-from typing import Any, Final
+from typing import Any, Final, Literal
 
 import mcp.types as mcp_types
 from mcp.server import Server
@@ -146,6 +146,29 @@ _NO_EMBEDDER_HINT = (
     "'sentence-transformers:BAAI/bge-base-en-v1.5' (requires "
     "`pip install research-mcp[sentence-transformers]`)."
 )
+
+
+def _resolve_faiss_index_type() -> Literal["flat", "hnsw"]:
+    """Parse RESEARCH_MCP_FAISS_INDEX_TYPE; default 'flat'.
+
+    `flat` preserves the pre-#7 behavior and is the right call for libraries
+    below ~100K papers. `hnsw` swaps in IndexHNSWFlat for sublinear search
+    with a small recall tradeoff — appropriate once the library is large
+    enough that flat search latency dominates.
+
+    Sidecar wins on conflict (see FaissIndex docstring): asking for `hnsw`
+    against an existing flat library logs a warning and keeps the flat
+    data — the user must rebuild explicitly to convert.
+    """
+    spec = os.environ.get("RESEARCH_MCP_FAISS_INDEX_TYPE", "").strip().lower()
+    if not spec or spec == "flat":
+        return "flat"
+    if spec == "hnsw":
+        return "hnsw"
+    raise RuntimeError(
+        f"RESEARCH_MCP_FAISS_INDEX_TYPE={spec!r} not understood. "
+        "Use 'flat' (default) or 'hnsw'."
+    )
 
 
 def _select_embedder() -> tuple[Embedder | None, str | None]:
@@ -497,6 +520,7 @@ def build_server(
     library: LibraryService | None,
     embedder_label: str | None,
     reranker_label: str | None = None,
+    index_type_label: str | None = None,
     claim_extractor: ClaimExtractor | None = None,
     citation_service: CitationService | None = None,
     analysis_service: AnalysisService | None = None,
@@ -888,6 +912,7 @@ def build_server(
                 count=0,
                 embedder=None,
                 reranker=reranker_label,
+                index_type=None,
                 sources=source_names,
                 claim_extractor=extractor_name,
                 paper_analyzer=analyzer_name,
@@ -898,6 +923,7 @@ def build_server(
             count=await library.count(),
             embedder=embedder_label,
             reranker=reranker_label,
+            index_type=index_type_label,
             sources=source_names,
             claim_extractor=extractor_name,
             paper_analyzer=analyzer_name,
@@ -1318,6 +1344,7 @@ async def run_default() -> None:
     embedder, label = _select_embedder()
     library: LibraryService | None = None
     index_to_close: FaissIndex | None = None
+    index_type_label: str | None = None
     if embedder is not None:
         index_path = os.environ.get("RESEARCH_MCP_INDEX_PATH")
         if not index_path:
@@ -1326,8 +1353,12 @@ async def run_default() -> None:
                 "configured. Set it to a writable directory; FAISS files "
                 "will live there."
             )
-        index = FaissIndex(index_path, dimension=embedder.dimension)
+        index_type = _resolve_faiss_index_type()
+        index = FaissIndex(
+            index_path, dimension=embedder.dimension, index_type=index_type
+        )
         index_to_close = index
+        index_type_label = index.index_type
         library = LibraryService(
             index=index,
             embedder=embedder,
@@ -1358,6 +1389,7 @@ async def run_default() -> None:
         library=library,
         embedder_label=label,
         reranker_label=reranker_label,
+        index_type_label=index_type_label,
         claim_extractor=claim_extractor,
         citation_service=citation_svc,
         analysis_service=(
