@@ -61,3 +61,17 @@ Implement the protocol in a new module under the matching package, write a test 
 ## Commits
 
 One logical change per commit, with a message that explains the motivation. Keep them honest — `wip` and `fix stuff` don't ship.
+
+## Branches and pull requests
+
+Every change ships through a feature branch off `main` and merges back as a squash-PR. This keeps `main` linear and lets parallel work (humans, cowork sessions, other agents) merge without conflicts.
+
+- **Branch from latest `origin/main`** at the start of every task. Never branch off another in-flight feature branch — when that one merges and squashes, your base disappears and you inherit conflicts.
+- **One concern per branch.** Name like `feat/<thing>`, `fix/<thing>`, or `docs/<thing>`. Keep scope tight so the PR can be reviewed in one sitting.
+- **Open a PR back to `main`** when ready. Include a "Test plan" section listing what you verified locally (`pytest`, `ruff`, `mypy`).
+- **Review the diff before merging,** especially for cowork or other automated PRs. `gh pr view <n>` shows the description; `gh pr diff <n>` shows the change.
+- **Squash-merge** so each PR becomes one commit on `main`. The PR title becomes the commit subject.
+- **Delete the branch on merge** — `gh pr merge --squash --delete-branch` deletes both the remote and the local branch in one step.
+- If two branches touch overlapping code, the second to PR rebases onto updated `main` rather than stacking. Stacking only works when you control the merge order.
+
+For parallel agent sessions specifically: each session branches off `origin/main` at start of its task and opens a PR back independently. Never have one session check out another session's branch as a starting point — that's how merge bombs get built.
