@@ -282,6 +282,11 @@ class LibraryStatusOutput(BaseModel):
     """Reranker selection string ('cross-encoder:BAAI/bge-reranker-base').
     None when no reranker is configured. Reranking is opt-in because it
     adds 200-1000ms per search/recall."""
+    index_type: str | None = None
+    """Effective FAISS index type ('flat' or 'hnsw'). Set by
+    `RESEARCH_MCP_FAISS_INDEX_TYPE`; sidecar wins on conflict so this is
+    the actual on-disk type, not necessarily what was requested. None
+    when no embedder/library is configured."""
     sources: list[str] = []
     """Names of configured search Sources, in the order they are tried
     for cross-source merge. Lets a caller verify whether PubMed /
