@@ -156,7 +156,17 @@ The project follows REPL-first development: prove a pattern works in `research-m
 
 ## Status
 
-Alpha. Interfaces may change before 1.0. PRs welcome — see [CONTRIBUTING.md](CONTRIBUTING.md).
+Alpha. Interfaces may change before 1.0.
+
+## Contributing
+
+PRs welcome — see [CONTRIBUTING.md](CONTRIBUTING.md) for setup, and [ROADMAP.md](ROADMAP.md) for what's on the wish list. Issues are tagged:
+
+- [`good first issue`](https://github.com/Burton-David/ResearchAssistantMCP/issues?q=label%3A%22good+first+issue%22) — scoped for a single afternoon, no deep architecture context needed
+- [`help wanted`](https://github.com/Burton-David/ResearchAssistantMCP/issues?q=label%3A%22help+wanted%22) — bigger features where the path is clear but the work isn't done
+- [`roadmap`](https://github.com/Burton-David/ResearchAssistantMCP/issues?q=label%3Aroadmap) — features tracked on the public roadmap
+
+Open a [discussion](https://github.com/Burton-David/ResearchAssistantMCP/discussions) before a large PR so the design conversation happens up front.
 
 ## License
 
