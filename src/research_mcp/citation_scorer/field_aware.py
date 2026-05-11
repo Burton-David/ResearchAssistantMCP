@@ -35,6 +35,7 @@ from __future__ import annotations
 import datetime as _dt
 from typing import Final
 
+from research_mcp.citation_scorer._author import HIndexLookup, score_authors
 from research_mcp.citation_scorer._field import Field, detect_field
 from research_mcp.citation_scorer._field_params import (
     EXPECTED_CITATION_VELOCITY,
@@ -70,6 +71,7 @@ class FieldAwareCitationScorer:
         base: CitationScorer | None = None,
         *,
         now: _dt.date | None = None,
+        h_index_lookup: HIndexLookup | None = None,
     ) -> None:
         self._base = base or HeuristicCitationScorer()
         # `now` is overridable for deterministic tests; in production,
@@ -78,6 +80,12 @@ class FieldAwareCitationScorer:
         # calls, and we don't want each `.score()` call to re-read the
         # clock and risk same-paper drift across a single request.
         self._now = now or _dt.date.today()
+        # `h_index_lookup` is the same callable the wrapped Heuristic uses
+        # (typically `s2.fetch_h_index`). Field-aware re-applies it with the
+        # detected field's tier table; the underlying disk cache makes the
+        # double-lookup two cache reads, not two API calls, after the first
+        # scoring of a paper.
+        self._h_index_lookup = h_index_lookup
 
     async def score(
         self,
@@ -98,20 +106,29 @@ class FieldAwareCitationScorer:
         new_impact, impact_factor = _score_impact_field_aware(
             paper, field, self._now
         )
+        # Re-score authors with the field-aware tier table. Heuristic
+        # already ran the lookup with Field.DEFAULT tiers; the disk
+        # cache means the second lookup is two reads, not two API
+        # calls. When `lookup is None` the helper returns the placeholder
+        # for both calls — base.author == new author, no harm done.
+        new_author, author_factor = await score_authors(
+            paper, field, self._h_index_lookup
+        )
         # `total` must equal `venue + impact + author + recency` per the
         # heuristic's reconciliation invariant (chaos-test 67.5≠60 bug).
-        # Venue + author come straight from base — we only redistribute
-        # the two field-sensitive dimensions.
-        new_total = base.venue + new_impact + base.author + new_recency
+        # Only venue comes straight from base — the venue lists already
+        # cover top-tier venues across all fields.
+        new_total = base.venue + new_impact + new_author + new_recency
         new_factors = dict(base.factors)
         new_factors["recency"] = recency_factor
         new_factors["impact"] = impact_factor
+        new_factors["author"] = author_factor
         new_factors["field"] = f"detected as {field.value}"
         return CitationQualityScore(
             total=round(new_total, 2),
             venue=base.venue,
             impact=round(new_impact, 2),
-            author=base.author,
+            author=round(new_author, 2),
             recency=round(new_recency, 2),
             factors=new_factors,
             # Base warnings already cover the same edge cases (retracted,

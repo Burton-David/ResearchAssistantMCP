@@ -167,6 +167,36 @@ class SemanticScholarSource:
             # A garbled body from S2 isn't an "id unknown"; treat as transient.
             raise SourceUnavailable(self.name, "response was not JSON") from exc
 
+    async def fetch_h_index(self, author_id: str) -> int | None:
+        """Resolve an S2 author id to their h-index.
+
+        Calls `/author/<id>?fields=hIndex` through the same rate-limit /
+        backoff / disk-cache stack as paper lookups. Returns:
+          * the integer h-index when present,
+          * `None` when the author id 404s (unknown) or the response
+            lacks the `hIndex` field.
+
+        Transient errors (5xx / network) propagate as `SourceUnavailable`
+        — same contract as `fetch()`. The citation scorer's author dim
+        catches that and falls back to its placeholder rather than
+        zeroing the dim on a flaky API.
+        """
+        if not author_id or not author_id.strip():
+            return None
+        body = await self._fetch_or_none(
+            f"/author/{author_id.strip()}",
+            {"fields": "hIndex"},
+        )
+        if body is None:
+            return None
+        try:
+            payload = json.loads(body)
+        except json.JSONDecodeError as exc:
+            _log.exception("s2 author response not JSON")
+            raise SourceUnavailable(self.name, "response was not JSON") from exc
+        h = payload.get("hIndex")
+        return h if isinstance(h, int) else None
+
     async def _fetch_or_none(
         self, path: str, params: dict[str, str]
     ) -> bytes | None:
@@ -246,8 +276,16 @@ def _parse_paper(raw: dict[str, Any]) -> Paper | None:
     venue = raw.get("venue") or (
         (raw.get("journal") or {}).get("name") if isinstance(raw.get("journal"), dict) else None
     )
+    # S2's `/paper/<id>?fields=authors` returns `[{authorId, name}, ...]` by
+    # default. authorId is the stable digit-string used by the
+    # /author/<id>?fields=hIndex endpoint; preserving it through Author is
+    # what unlocks the citation scorer's author dim without a name-
+    # disambiguation round-trip per author.
     authors = tuple(
-        Author(name=a["name"])
+        Author(
+            name=a["name"],
+            s2_id=a.get("authorId") if isinstance(a.get("authorId"), str) else None,
+        )
         for a in raw.get("authors") or []
         if isinstance(a, dict) and a.get("name")
     )
