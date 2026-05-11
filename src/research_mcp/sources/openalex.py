@@ -26,9 +26,10 @@ from __future__ import annotations
 import json
 import logging
 import os
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from datetime import date
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any, Final
 
 import httpx
@@ -197,6 +198,7 @@ def _parse_work(raw: dict[str, Any] | None) -> Paper | None:
         doi=doi,
         pdf_url=pdf_url,
         citation_count=citation_count,
+        metadata=_extract_metadata(raw),
     )
 
 
@@ -293,6 +295,25 @@ def _extract_pdf_url(raw: dict[str, Any]) -> str | None:
         if isinstance(url, str) and url:
             return url
     return None
+
+
+def _extract_metadata(raw: dict[str, Any]) -> Mapping[str, str]:
+    """Surface field/topic hints into Paper.metadata for downstream scoring.
+
+    OpenAlex's `primary_topic.field.display_name` gives a coarse discipline
+    label ("Computer Science", "Medicine", "Mathematics", ...). The field-aware
+    scorer reads `metadata["openalex_field"]` as a fallback when arXiv's
+    primary_category isn't available (e.g., non-CS papers from PubMed/OpenAlex).
+    """
+    meta: dict[str, str] = {}
+    topic = raw.get("primary_topic")
+    if isinstance(topic, dict):
+        field_block = topic.get("field")
+        if isinstance(field_block, dict):
+            name = field_block.get("display_name")
+            if isinstance(name, str) and name.strip():
+                meta["openalex_field"] = name.strip()
+    return MappingProxyType(meta)
 
 
 def _extract_authors(raw: dict[str, Any]) -> tuple[Author, ...]:
