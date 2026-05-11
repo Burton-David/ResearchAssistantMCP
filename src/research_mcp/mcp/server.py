@@ -31,6 +31,7 @@ from research_mcp import __version__
 from research_mcp.citation import RENDERERS
 from research_mcp.citation_scorer import HeuristicCitationScorer
 from research_mcp.domain.citation import CitationFormat
+from research_mcp.domain.citation_scorer import CitationScorer
 from research_mcp.domain.claim import ClaimExtractor
 from research_mcp.domain.embedder import Embedder
 from research_mcp.domain.paper import Paper
@@ -328,6 +329,61 @@ def _select_paper_analyzer() -> PaperAnalyzer | None:
         f"RESEARCH_MCP_ANALYSIS_MODEL={spec!r} not understood. "
         "Use 'openai:<model>' or 'anthropic:<model>'."
     )
+
+
+def _select_citation_scorer() -> CitationScorer:
+    """Resolve `RESEARCH_MCP_CITATION_SCORER` to a CitationScorer instance.
+
+    Formats:
+      * unset / "heuristic"           → HeuristicCitationScorer (default)
+      * "llm:openai:<model>"          → OpenAILLMCitationScorer wrapping heuristic
+      * "llm:anthropic:<model>"       → AnthropicLLMCitationScorer wrapping heuristic
+
+    LLM scorers compose on top of the heuristic — they adjust the total
+    by a semantic-relevance signal but never replace the four
+    data-grounded dimensions. Construction failures (missing API key,
+    missing extra) degrade to the heuristic with a warning so the
+    server still boots.
+    """
+    spec = os.environ.get("RESEARCH_MCP_CITATION_SCORER", "").strip()
+    if not spec or spec == "heuristic":
+        return HeuristicCitationScorer()
+    if spec.startswith("llm:"):
+        return _build_llm_citation_scorer(spec[len("llm:"):])
+    raise RuntimeError(
+        f"RESEARCH_MCP_CITATION_SCORER={spec!r} not understood. "
+        "Use 'heuristic' or 'llm:openai:<model>' or 'llm:anthropic:<model>'."
+    )
+
+
+def _build_llm_citation_scorer(spec: str) -> CitationScorer:
+    """Parse 'openai:<model>' or 'anthropic:<model>' into the right adapter."""
+    provider, _, model = spec.partition(":")
+    provider = provider.strip().lower()
+    model = model.strip()
+    try:
+        if provider == "openai":
+            from research_mcp.citation_scorer import OpenAILLMCitationScorer
+
+            return OpenAILLMCitationScorer(model=model or "gpt-4o-mini")
+        if provider == "anthropic":
+            from research_mcp.citation_scorer import AnthropicLLMCitationScorer
+
+            return AnthropicLLMCitationScorer(
+                model=model or "claude-haiku-4-5-20251001"
+            )
+    except Exception as exc:  # pragma: no cover — env-specific
+        _log.warning(
+            "LLM citation scorer construction failed (%s); falling back to heuristic",
+            exc,
+        )
+        return HeuristicCitationScorer()
+    _log.warning(
+        "RESEARCH_MCP_CITATION_SCORER=llm:%r not understood; "
+        "supported providers: openai, anthropic. Falling back to heuristic.",
+        spec,
+    )
+    return HeuristicCitationScorer()
 
 
 def _select_claim_extractor() -> ClaimExtractor | None:
@@ -1170,7 +1226,7 @@ async def run_default() -> None:
 
     paper_analyzer = _select_paper_analyzer()
     claim_extractor = _select_claim_extractor()
-    citation_svc = CitationService(search=search, scorer=HeuristicCitationScorer())
+    citation_svc = CitationService(search=search, scorer=_select_citation_scorer())
     draft_svc = (
         DraftService(extractor=claim_extractor, citation=citation_svc)
         if claim_extractor is not None
