@@ -1,0 +1,58 @@
+name: Feature request
+description: Propose a new capability or behavior for research-mcp.
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for proposing something. Please describe the **problem** first — concrete use cases are
+        easier to evaluate than concrete solutions. We may end up shipping a different shape than you
+        proposed, and that's fine.
+
+        Larger features should be discussed in [Discussions](https://github.com/Burton-David/ResearchAssistantMCP/discussions)
+        before a full issue if you're not sure about scope.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem does this solve?
+      description: |
+        Describe the user-visible problem. What can't you do today, or what's awkward about doing it?
+      placeholder: |
+        When citing very old foundational papers (50+ years), the recency dimension dominates the score
+        and pushes them below adjacent newer-but-less-canonical work. The user has to fall back to
+        `search_papers` and pick manually.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposed
+    attributes:
+      label: Proposed solution (optional)
+      description: |
+        If you have an approach in mind, describe it. Don't worry about getting the design right —
+        the discussion in the issue will refine it.
+    validations:
+      required: false
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered (optional)
+      description: |
+        Other approaches you thought about and why you ruled them out, if applicable.
+    validations:
+      required: false
+
+  - type: dropdown
+    id: scope
+    attributes:
+      label: Estimated scope
+      description: Best guess; the maintainer will re-label if needed.
+      options:
+        - "Small (afternoon, single file)"
+        - "Medium (multi-file, may touch a protocol implementation)"
+        - "Large (new protocol, ADR-grade decisions)"
+        - "Not sure"
+    validations:
+      required: false

@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Usage question
+    url: https://github.com/Burton-David/ResearchAssistantMCP/discussions
+    about: How do I…? questions belong in Discussions, not issues.
+  - name: Roadmap items
+    url: https://github.com/Burton-David/ResearchAssistantMCP/issues?q=label%3Aroadmap
+    about: Existing roadmap items already triaged and labeled.
+  - name: Good first issues
+    url: https://github.com/Burton-David/ResearchAssistantMCP/issues?q=label%3A%22good+first+issue%22
+    about: Issues scoped for a single afternoon, no deep context needed.
