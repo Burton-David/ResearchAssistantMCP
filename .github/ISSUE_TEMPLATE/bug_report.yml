@@ -1,0 +1,86 @@
+name: Bug report
+description: Something in research-mcp doesn't work as documented or as expected.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for filing a bug. The more concrete you can be about reproduction, the faster a fix lands.
+        For usage questions ("how do I…?") please use [Discussions](https://github.com/Burton-David/ResearchAssistantMCP/discussions) instead.
+
+  - type: textarea
+    id: summary
+    attributes:
+      label: What happened
+      description: One-paragraph summary. What did you do, what did you see, what did you expect?
+      placeholder: |
+        I called `assist_draft` with a 2000-character paragraph and got a 500-char validation error,
+        even though the docstring says drafts up to 20K chars are supported.
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: How to reproduce
+      description: Minimal steps or code that reliably trigger the bug.
+      placeholder: |
+        1. Set `RESEARCH_MCP_OPENALEX_EMAIL=you@example.com`
+        2. Run `research-mcp serve`
+        3. Call `assist_draft` with text="<800 chars of academic prose>"
+        4. Observe error: <paste>
+      render: bash
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      description: What did you think would happen instead?
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: research-mcp version / commit
+      description: Output of `git rev-parse HEAD` or the pip-installed version.
+      placeholder: "main @ 626b223"
+    validations:
+      required: true
+
+  - type: input
+    id: python
+    attributes:
+      label: Python version
+      placeholder: "3.12.4"
+    validations:
+      required: true
+
+  - type: input
+    id: os
+    attributes:
+      label: Operating system
+      placeholder: "macOS 14.5 / Ubuntu 22.04 / Windows 11"
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs
+      description: |
+        Paste any stderr / tool-call output / stack traces. Server logs go to stderr;
+        capture with `research-mcp serve 2>logs.txt`.
+      render: text
+    validations:
+      required: false
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: Anything else that might matter — env vars, custom protocol implementations, recent changes.
+    validations:
+      required: false
