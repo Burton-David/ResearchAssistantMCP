@@ -53,8 +53,13 @@ from research_mcp.domain.paper import Paper
 # for each dimension. Keeping them here avoids importing from a private-
 # style module name (`heuristic._RECENCY_MAX`); if the heuristic's max
 # changes, both modules need updating, but that's a one-line edit.
-_RECENCY_MAX: Final = 25.0
-_IMPACT_MAX: Final = 30.0
+_RECENCY_MAX: Final = 10.0
+_IMPACT_MAX: Final = 35.0
+
+# Mirrors heuristic._FOUNDATIONAL_CITATION_THRESHOLD. Papers above this
+# many citations skip the recency decay regardless of field — a paper
+# this widely cited is canonical even in fast-moving disciplines like CS.
+_FOUNDATIONAL_CITATION_THRESHOLD: Final = 10_000
 # Below this many days, citation count is too noisy to score on.
 # Mirrors heuristic.py's threshold so the "fresh but unproven" penalty
 # kicks in at the same age across both scorers.
@@ -142,19 +147,34 @@ class FieldAwareCitationScorer:
 def _score_recency_field_aware(
     paper: Paper, field: Field, now: _dt.date,
 ) -> tuple[float, str]:
-    """Per-field linear-decay recency score.
+    """Per-field logarithmic-decay recency score.
 
-    Mirrors the structure of `heuristic._score_recency` but with a
-    field-specific half-life. The "fresh but unproven" penalty (drop
-    to 30% when citation_count is None/0 AND paper is under the
-    half-life) still applies — that check protects against new papers
-    free-riding to the top of recommendations regardless of field.
+    Mirrors the structure of `heuristic._score_recency` (log decay
+    that never hits zero + foundational-citation exemption) but with
+    a field-specific half-life. The "fresh but unproven" penalty
+    (drop to 30% when citation_count is None/0 AND paper is under
+    the half-life) still applies — that check protects against new
+    papers free-riding to the top of recommendations regardless of
+    field.
     """
     if not paper.published:
         return 0.0, "Publication date unknown."
     half_life = RECENCY_HALF_LIFE_YEARS[field]
     years = max((now - paper.published).days / 365.25, 0.0)
-    factor = max(0.0, 1.0 - years / half_life)
+
+    if (
+        paper.citation_count is not None
+        and paper.citation_count >= _FOUNDATIONAL_CITATION_THRESHOLD
+    ):
+        return (
+            _RECENCY_MAX,
+            f"Published {years:.1f} years ago; recency uncapped because "
+            f"citation count ({paper.citation_count:,}) is at or above "
+            f"the foundational threshold ({_FOUNDATIONAL_CITATION_THRESHOLD:,}) "
+            f"(field={field.value}, half_life={half_life:.0f}y).",
+        )
+
+    factor = 1.0 / (1.0 + years / half_life)
     score = _RECENCY_MAX * factor
 
     impact_unknown = paper.citation_count is None or paper.citation_count == 0

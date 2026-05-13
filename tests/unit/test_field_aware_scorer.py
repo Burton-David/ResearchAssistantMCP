@@ -196,19 +196,20 @@ async def test_field_aware_returns_base_unchanged_for_default_field() -> None:
 
 
 async def test_field_aware_extends_recency_for_old_math_paper() -> None:
-    """An 11-year-old math paper under CS half-life (4y) would score 0
-    on recency. Under math half-life (15y) it should retain ~4/15 ≈ 27%
-    of the recency dimension — visibly higher than the CS treatment."""
+    """An 11-year-old paper decays much more slowly under math's 15y
+    half-life than under CS's 4y. Both stay positive (log decay never
+    zeroes), but math should retain meaningfully more of the recency
+    dimension — and the total uplift should follow."""
     cs_scorer = FieldAwareCitationScorer(
         HeuristicCitationScorer(now=_FIXED_NOW), now=_FIXED_NOW
     )
     cs_score = await cs_scorer.score(_cs_paper_old())
     math_score = await cs_scorer.score(_math_paper_old())
-    # CS recency for an 11-year-old paper is 0 (past 4y half-life).
-    assert cs_score.recency == 0.0
-    # Math recency for the same age is positive (still under 15y half-life).
-    assert math_score.recency > 0.0
-    # And the math paper's total should reflect the recency uplift.
+    # Both positive (log decay never zeroes), but math substantially
+    # higher: 1/(1+11/15) ≈ 0.58 vs CS 1/(1+11/4) ≈ 0.27.
+    assert cs_score.recency > 0.0
+    assert math_score.recency > cs_score.recency
+    # Math paper's total should reflect the recency uplift.
     assert math_score.total > cs_score.total
 
 

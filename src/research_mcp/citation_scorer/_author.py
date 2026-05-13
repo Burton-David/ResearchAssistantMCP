@@ -34,7 +34,7 @@ _log = logging.getLogger(__name__)
 # came from.
 HIndexLookup = Callable[[str], Awaitable[int | None]]
 
-_AUTHOR_MAX: Final = 20.0
+_AUTHOR_MAX: Final = 25.0
 
 # Multiplier when h-index data is unavailable (no authors, no lookup,
 # all lookups returned None). Same as the old heuristic placeholder so

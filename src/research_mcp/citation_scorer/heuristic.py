@@ -1,26 +1,33 @@
-"""Heuristic citation-quality scorer — venue + impact + recency.
+"""Heuristic citation-quality scorer — venue + impact + author + recency.
 
 Inputs come from `Paper` (already populated by the source adapter):
 no LLM calls, no network. Tradeoff: misses semantic appropriateness
 ("does this paper actually say what we want to cite it for?"). The
-LLM-based scorer in CA-Batch 9 fills that gap; this one anchors on
-metadata that survives offline.
+LLM-based scorer fills that gap; this one anchors on metadata that
+survives offline.
 
-Score breakdown (the four `CitationQualityScore` dimensions):
+Score breakdown (the four `CitationQualityScore` dimensions, summing
+to 100):
 
-  * `venue` (0-25) — top venue → ~25, predatory → 0, unknown → ~7.
-  * `impact` (0-25) — citations / years-since-pub vs. an expected
+  * `venue` (0-30) — top venue → 30, predatory → 0, unknown → ~9.
+    This is the peer-review proxy: top conferences/journals get full
+    credit, arXiv-only preprints get partial, predatory patterns zero.
+  * `impact` (0-35) — citations / years-since-pub vs. an expected
     rate. arXiv-only papers (citation_count=None) get a baseline so
     they're not zeroed.
-  * `author` (0-20) — placeholder baseline of 10. Author h-index is
-    not yet plumbed through; a future change will pull it from S2 /
-    OpenAlex when available.
-  * `recency` (0-15) — younger paper, higher score. Year-based decay,
-    not field-aware (yet).
+  * `author` (0-25) — h-index of strongest author, field-aware tier
+    table. Falls back to a placeholder when no S2 author id is known.
+  * `recency` (0-10) — logarithmic decay, **never zero**. A 50-year-
+    old paper still gets a small contribution. Papers with citation
+    count above `_FOUNDATIONAL_CITATION_THRESHOLD` skip the decay
+    entirely — they've proven foundational regardless of age.
 
-A 15-point cross-source-consensus / catch-all band rounds the total
-to 100; we add it implicitly via the unweighted residue rather than
-expose a separate dimension.
+Recency dropped from 25 → 10 points in the 2026-05-13 revamp because
+the previous weight + linear-decay-to-zero structurally penalized
+foundational papers (Vaswani at 8.9y → 0 recency under CS half-life,
+losing a quarter of the total score against newer-but-less-canonical
+candidates). The 15 reclaimed points went to venue (+5) / impact (+5)
+/ author (+5).
 
 Warnings can zero the entire score:
   * `is_retracted` flag in `Paper.metadata` → total = 0
@@ -48,24 +55,35 @@ from research_mcp.domain.citation_scorer import CitationQualityScore
 from research_mcp.domain.claim import Claim
 from research_mcp.domain.paper import Paper
 
-# Maximum points each dimension can contribute, summing to 100.
-# Per-dimension caps. Sum to 100 so `total` exactly equals
-# venue + impact + author + recency — no hidden residual band.
-# A previous version reserved 15 points for a never-implemented
-# cross-source-consensus dimension, which made the displayed
-# breakdown not reconcile with the total (chaos-test caught it:
-# 25+25+10+0=60 ≠ shown total 67.5). Dropped the residual and
-# redistributed those points to recency (the dimension that most
-# benefits from a wider range — strict 0→15 was too narrow for
-# field-aware decay we may add later).
-_VENUE_MAX: Final = 25.0
-_IMPACT_MAX: Final = 30.0
-_AUTHOR_MAX: Final = 20.0
-_RECENCY_MAX: Final = 25.0
+# Maximum points each dimension can contribute, summing to 100 so
+# `total` exactly equals venue + impact + author + recency.
+#
+# Weight history:
+#   v1: 25 / 25 / 10 / 25, reserving 15 for a never-implemented
+#       cross-source-consensus dimension. Total didn't reconcile.
+#   v2: 25 / 30 / 20 / 25 (post-#15 / #17), residual eliminated,
+#       redistributed into impact / author / recency.
+#   v3 (this file): 30 / 35 / 25 / 10. Recency dropped from 25 to 10
+#       because the previous weight + linear-decay-to-zero structurally
+#       penalized foundational papers. Reclaimed points went to the
+#       three signals that *don't* decay with age.
+_VENUE_MAX: Final = 30.0
+_IMPACT_MAX: Final = 35.0
+_AUTHOR_MAX: Final = 25.0
+_RECENCY_MAX: Final = 10.0
 
-# Used by the recency dimension. After this many years a paper's
-# recency contribution decays to zero.
+# Used by the recency dimension as the half-life of the logarithmic
+# decay (NOT a hard cutoff — see `_score_recency`). Field-aware
+# overrides this per detected discipline.
 _RECENCY_HALF_LIFE_YEARS: Final = 5.0
+
+# Papers with citation count at or above this threshold skip the
+# recency decay entirely. The intuition: a paper with this many
+# citations has *proven* foundational, and ranking it below a newer
+# adjacent paper for being old is a clear scorer failure. 10K is a
+# defensible field-agnostic floor — across CS, medicine, math, and
+# physics, anything north of 10K cites is universally canonical.
+_FOUNDATIONAL_CITATION_THRESHOLD: Final = 10_000
 
 # Citation-velocity expectation (citations / year). 5 is a defensible
 # field-agnostic baseline — CS papers cite faster, math much slower —
@@ -269,20 +287,44 @@ def _score_impact(paper: Paper, now: _dt.date) -> tuple[float, str, list[str]]:
 
 
 def _score_recency(paper: Paper, now: _dt.date) -> tuple[float, str]:
-    """Score recency, but penalize 'fresh but unproven' papers.
+    """Logarithmic-decay recency score that never zeros out foundational papers.
 
-    Naive recency favors any new paper equally. The chaos test caught
-    this: a 2025 paper with 0 citations beat ACL 2021 (which had real
-    citations) because recency carried 13 of its 47 points. Fix is to
-    require an impact signal alongside recency: when `citation_count`
-    is None or 0 AND the paper is under 5 years old, drop the recency
-    contribution by 70%. This stops un-cited recent papers from
-    free-riding to the top of recommendation lists.
+    Decay shape: ``1 / (1 + years / half_life)`` — at the half-life,
+    factor is 0.5; never reaches 0 for any finite age. A 50-year-old
+    paper still contributes ~7% of `_RECENCY_MAX`. This was changed
+    from a linear-decay-to-zero in 2026-05-13 because the previous
+    behavior penalized foundational papers (Vaswani at 8.9y under the
+    CS half-life of 4y → 0 recency, costing 25 points it never had
+    a chance to recover).
+
+    Two exceptions to the smooth decay:
+
+    1. **Foundational-citation exemption** — papers with citation
+       count ≥ ``_FOUNDATIONAL_CITATION_THRESHOLD`` skip the decay
+       entirely and get full recency credit. A 175K-cite paper has
+       *proven* canonical; demoting it for age is a scorer failure.
+
+    2. **Fresh-but-unproven penalty** — kept from the earlier
+       version. When `citation_count` is None or 0 AND the paper is
+       under the half-life, drop the contribution by 70%. Stops
+       un-cited brand-new papers from free-riding to the top.
     """
     if not paper.published:
         return 0.0, "Publication date unknown."
     years = max((now - paper.published).days / 365.25, 0.0)
-    factor = max(0.0, 1.0 - years / _RECENCY_HALF_LIFE_YEARS)
+
+    if (
+        paper.citation_count is not None
+        and paper.citation_count >= _FOUNDATIONAL_CITATION_THRESHOLD
+    ):
+        return (
+            _RECENCY_MAX,
+            f"Published {years:.1f} years ago; recency uncapped because "
+            f"citation count ({paper.citation_count:,}) is at or above "
+            f"the foundational threshold ({_FOUNDATIONAL_CITATION_THRESHOLD:,}).",
+        )
+
+    factor = 1.0 / (1.0 + years / _RECENCY_HALF_LIFE_YEARS)
     score = _RECENCY_MAX * factor
 
     impact_unknown = paper.citation_count is None or paper.citation_count == 0

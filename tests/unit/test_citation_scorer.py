@@ -110,22 +110,26 @@ async def test_single_word_journal_match_is_exact_only() -> None:
     """`Science` (the journal) must match; `Computer Science` and
     `Procedia Computer Science` must NOT — they aren't the journal. This
     was a real false-positive caught at REPL test."""
+    from research_mcp.citation_scorer.heuristic import _VENUE_MAX
+
     scorer = HeuristicCitationScorer(now=date(2026, 5, 10))
     journal = await scorer.score(_paper(venue="Science", year=2020))
     not_journal = await scorer.score(
         _paper(venue="Procedia Computer Science", year=2020)
     )
-    assert journal.venue == 25.0  # exact match
-    assert not_journal.venue < 25.0  # generic conference / unknown
+    assert journal.venue == _VENUE_MAX  # exact match → top-tier credit
+    assert not_journal.venue < _VENUE_MAX  # generic conference / unknown
 
 
 async def test_acronym_match_does_not_fire_inside_longer_words() -> None:
     """`acl` must match the conference but not 'manacled' or 'oracle'."""
+    from research_mcp.citation_scorer.heuristic import _VENUE_MAX
+
     scorer = HeuristicCitationScorer(now=date(2026, 5, 10))
     acl = await scorer.score(_paper(venue="ACL", year=2020))
     nope = await scorer.score(_paper(venue="Oracle Database Conference", year=2020))
-    assert acl.venue == 25.0
-    assert nope.venue < 25.0
+    assert acl.venue == _VENUE_MAX
+    assert nope.venue < _VENUE_MAX
 
 
 async def test_warns_when_citation_count_missing() -> None:
@@ -210,6 +214,104 @@ async def test_recency_is_zero_when_year_unknown() -> None:
     scorer = HeuristicCitationScorer(now=date(2026, 5, 10))
     result = await scorer.score(_paper(venue="NeurIPS", year=None))
     assert result.recency == 0.0
+
+
+async def test_recency_never_zeros_for_known_old_papers() -> None:
+    """Log decay: a 50-year-old paper should still contribute a small
+    but non-zero recency signal. This is the property that fixes the
+    Vaswani-at-8.9y → 0 recency failure mode."""
+    from research_mcp.citation_scorer.heuristic import _RECENCY_MAX
+
+    scorer = HeuristicCitationScorer(now=date(2026, 5, 10))
+    very_old = await scorer.score(_paper(venue="Nature", year=1975, citation_count=500))
+    assert 0.0 < very_old.recency < _RECENCY_MAX * 0.2  # ~7% under default 5y half-life
+
+
+async def test_recency_decays_smoothly_not_in_cliffs() -> None:
+    """At the half-life, factor should be exactly 0.5; at 2x half-life,
+    factor should be ~0.33; never zero for any positive year."""
+    from research_mcp.citation_scorer.heuristic import (
+        _RECENCY_HALF_LIFE_YEARS,
+        _RECENCY_MAX,
+    )
+
+    half = _RECENCY_HALF_LIFE_YEARS
+    scorer = HeuristicCitationScorer(now=date(2026, 1, 1))
+    # Use citation_count > 0 so the fresh-but-unproven penalty doesn't fire.
+    at_half = await scorer.score(
+        _paper(venue="Nature", year=2026 - int(half), citation_count=100)
+    )
+    # ~0.5 of max — allow a small margin for the date-arithmetic
+    assert abs(at_half.recency - _RECENCY_MAX * 0.5) < 0.5
+
+    at_double = await scorer.score(
+        _paper(venue="Nature", year=2026 - int(half * 2), citation_count=100)
+    )
+    # 1/(1 + 2) ≈ 0.333 of max
+    assert abs(at_double.recency - _RECENCY_MAX / 3) < 0.5
+
+
+async def test_foundational_paper_skips_recency_decay() -> None:
+    """A paper with ≥10K citations is foundational and should get full
+    recency credit regardless of age — Vaswani at 8.9y is the motivating
+    case."""
+    from research_mcp.citation_scorer.heuristic import (
+        _FOUNDATIONAL_CITATION_THRESHOLD,
+        _RECENCY_MAX,
+    )
+
+    scorer = HeuristicCitationScorer(now=date(2026, 5, 10))
+    foundational = await scorer.score(
+        _paper(
+            venue="NeurIPS",
+            year=2017,  # ~8.9 years
+            citation_count=_FOUNDATIONAL_CITATION_THRESHOLD,
+        )
+    )
+    assert foundational.recency == _RECENCY_MAX
+    # And the factor message should explain why.
+    assert "foundational" in foundational.factors["recency"].lower()
+
+
+async def test_foundational_threshold_is_inclusive() -> None:
+    """citation_count == threshold should trigger the exemption (>=, not >)."""
+    from research_mcp.citation_scorer.heuristic import (
+        _FOUNDATIONAL_CITATION_THRESHOLD,
+        _RECENCY_MAX,
+    )
+
+    scorer = HeuristicCitationScorer(now=date(2026, 5, 10))
+    at_threshold = await scorer.score(
+        _paper(
+            venue="NeurIPS",
+            year=2000,  # very old
+            citation_count=_FOUNDATIONAL_CITATION_THRESHOLD,
+        )
+    )
+    assert at_threshold.recency == _RECENCY_MAX
+
+    below_threshold = await scorer.score(
+        _paper(
+            venue="NeurIPS",
+            year=2000,
+            citation_count=_FOUNDATIONAL_CITATION_THRESHOLD - 1,
+        )
+    )
+    assert below_threshold.recency < _RECENCY_MAX
+
+
+async def test_dimension_maxes_sum_to_one_hundred() -> None:
+    """Reconciliation invariant: the four dimension caps must total 100
+    so `score.total` is a percentage. Catches accidental drift if a
+    future change to one cap forgets to redistribute."""
+    from research_mcp.citation_scorer._author import _AUTHOR_MAX
+    from research_mcp.citation_scorer.heuristic import (
+        _IMPACT_MAX,
+        _RECENCY_MAX,
+        _VENUE_MAX,
+    )
+
+    assert _VENUE_MAX + _IMPACT_MAX + _AUTHOR_MAX + _RECENCY_MAX == 100.0
 
 
 # ---- retraction / very-recent warnings ----
