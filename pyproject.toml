@@ -113,3 +113,14 @@ markers = [
     "integration: tests that hit real arXiv / Semantic Scholar (gated by RESEARCH_MCP_INTEGRATION=1)",
     "e2e: end-to-end MCP server boot tests",
 ]
+# Suppress third-party warnings we can't fix at source:
+# - FAISS ships SWIG-wrapped C++ bindings; Python 3.14 deprecated some
+#   internal SWIG behaviors (SwigPyObject / SwigPyPacked / swigvarlink
+#   missing __module__). Upstream FAISS fix; nothing to do here.
+# - spaCy's language data leaves sqlite connections open under -W
+#   default. Benign per the spaCy team; tracked upstream.
+filterwarnings = [
+    "ignore:builtin type Swig.*:DeprecationWarning",
+    "ignore:builtin type swigvarlink.*:DeprecationWarning",
+    "ignore:unclosed database.*:ResourceWarning",
+]
