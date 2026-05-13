@@ -12,7 +12,7 @@ The proposed architecture achieves 28.4 BLEU on WMT 2014 EN-DE.
 """
 ```
 
-→ extracts three claims (one comparative, one methodological, one statistical), runs each through search across all configured sources, scores candidates by venue + impact + recency, and returns ranked recommendations with the reasoning a researcher could show to a co-author. One MCP call, full pipeline.
+→ extracts three claims (one comparative, one methodological, one statistical), runs each through search across all configured sources, scores candidates on four dimensions — venue (peer-review tier, 30 pts), impact (citation count + velocity, 35 pts), author (max h-index across authors, 25 pts), recency (log-decay; foundational papers exempt, 10 pts) — and returns ranked recommendations with the reasoning a researcher could show to a co-author. One MCP call, full pipeline.
 
 ## Why
 
@@ -20,7 +20,7 @@ LLMs are good at synthesis and bad at sourcing. Off-the-shelf web search returns
 
 ## What it does
 
-Twelve MCP tools the LLM calls directly, organized by stage of the research workflow.
+Fourteen MCP tools the LLM calls directly, organized by stage of the research workflow.
 
 **Citation assistance**
 - **`assist_draft`** — the killer demo: draft → claims → ranked, explained citation recommendations. Streams progress notifications when the client supplies a `progressToken`, so the LLM sees "claim 3/8 done" updates as the pipeline runs.
@@ -40,6 +40,10 @@ Twelve MCP tools the LLM calls directly, organized by stage of the research work
 - **`get_paper`** — preview full Paper metadata for an id, with cross-source enrichment for venue / DOI / citation count.
 - **`library_status`** — paper count plus the configured embedder / reranker / source list / claim extractor / paper analyzer / citation scorer. Single call confirms the entire wiring.
 
+**Citation graph traversal**
+- **`find_referenced_by`** — given a paper, return up to N papers it cites. Walks OpenAlex's `referenced_works` deterministically (this is the citation graph, not similarity).
+- **`find_related`** — given a paper, return up to N papers OpenAlex considers similar by topic-vector overlap. Useful for exploration; not a citation relationship.
+
 **Plus one MCP prompt template:** `review_draft_for_citations` — bundles the right framing for `assist_draft` so a researcher who opens Claude Desktop's prompt menu sees an obvious entry point.
 
 ## Quick start
@@ -54,8 +58,9 @@ uv sync                                    # or: pip install -e ".[dev]"
 pip install -e ".[claim-extraction]"
 python -m spacy download en_core_web_sm
 
-# Search, find, cite, get_paper, score_citation, find_citations all work
-# with no env vars at all:
+# search_papers, find_paper, cite_paper, get_paper, find_citations,
+# explain_citation, extract_claims, library_status, find_referenced_by,
+# find_related all work with no env vars at all:
 research-mcp search "transformer scaling laws" --max 10
 research-mcp cite arxiv:1706.03762 --format ama
 
