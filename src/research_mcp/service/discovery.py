@@ -15,16 +15,14 @@ at most three candidates with `confidence` ∈ [0, 1] sorted descending.
 
 from __future__ import annotations
 
-import re
-import unicodedata
 from collections.abc import Iterable
 from dataclasses import dataclass
 
 from research_mcp.domain.paper import Author, Paper
 from research_mcp.domain.query import SearchQuery
+from research_mcp.service._tokens import tokenize
 from research_mcp.service.search import SearchService
 
-_NON_ALNUM_RE = re.compile(r"[^a-z0-9]+")
 _TITLE_STOPWORDS = frozenset(
     {"a", "an", "the", "of", "in", "on", "for", "with", "and", "or", "to"}
 )
@@ -126,12 +124,7 @@ class DiscoveryService:
 
 
 def _title_tokens(title: str) -> set[str]:
-    folded = unicodedata.normalize("NFKD", title).encode("ascii", "ignore").decode()
-    return {
-        t
-        for t in _NON_ALNUM_RE.split(folded.lower())
-        if t and t not in _TITLE_STOPWORDS
-    }
+    return set(tokenize(title, stopwords=_TITLE_STOPWORDS))
 
 
 def has_significant_tokens(title: str) -> bool:
@@ -151,8 +144,7 @@ def _surname(author_name: str | Author) -> str:
         return ""
     if "," in raw:
         return _surname(raw.partition(",")[0])
-    folded = unicodedata.normalize("NFKD", raw).encode("ascii", "ignore").decode()
-    parts = [t for t in _NON_ALNUM_RE.split(folded.lower()) if t]
+    parts = tokenize(raw)
     return parts[-1] if parts else ""
 
 

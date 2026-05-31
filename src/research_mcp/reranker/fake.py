@@ -12,13 +12,10 @@ match one set of papers and not another, then check the ordering.
 
 from __future__ import annotations
 
-import re
-import unicodedata
 from collections.abc import Sequence
 
 from research_mcp.domain.paper import Paper
-
-_NON_ALNUM_RE = re.compile(r"[^a-z0-9]+")
+from research_mcp.service._tokens import tokenize
 
 
 class FakeReranker:
@@ -46,8 +43,7 @@ class FakeReranker:
 
 
 def _tokens(text: str) -> set[str]:
-    folded = unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode()
-    return {t for t in _NON_ALNUM_RE.split(folded.lower()) if t}
+    return set(tokenize(text))
 
 
 def _jaccard(a: set[str], b: set[str]) -> float:

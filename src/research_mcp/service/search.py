@@ -28,8 +28,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import re
-import unicodedata
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date
@@ -40,6 +38,7 @@ from research_mcp.domain.query import SearchQuery
 from research_mcp.domain.reranker import Reranker
 from research_mcp.domain.source import Source
 from research_mcp.errors import SourceUnavailable, redact_secrets
+from research_mcp.service._tokens import tokenize
 
 # When a reranker is configured, fetch this many times the user-requested
 # max_results from each Source before reranking. The standard recipe is
@@ -67,8 +66,6 @@ _log = logging.getLogger(__name__)
 # we want to collapse "Attention Is All You Need" and "Attention is all you need"
 # without merging two genuinely different papers that happen to share a stopword.
 _TITLE_STOPWORDS = frozenset({"a", "an", "the"})
-
-_NON_ALNUM_RE = re.compile(r"[^a-z0-9]+")
 
 # Order of preference when picking the canonical id for a merged record.
 # arXiv ids never change across versions (we strip the version suffix on
@@ -307,15 +304,13 @@ def _title_key(paper: Paper) -> str:
     title = (paper.title or "").strip()
     if not title:
         return ""
-    folded = unicodedata.normalize("NFKD", title).encode("ascii", "ignore").decode()
-    tokens = [t for t in _NON_ALNUM_RE.split(folded.lower()) if t and t not in _TITLE_STOPWORDS]
+    tokens = tokenize(title, stopwords=_TITLE_STOPWORDS)
     if not tokens:
         return ""
     title_part = "-".join(tokens)
     surname = ""
     if paper.authors:
-        first = unicodedata.normalize("NFKD", paper.authors[0].name).encode("ascii", "ignore").decode()
-        surname_tokens = [t for t in _NON_ALNUM_RE.split(first.lower()) if t]
+        surname_tokens = tokenize(paper.authors[0].name)
         surname = surname_tokens[-1] if surname_tokens else ""
     return f"title:{title_part}|{surname}"
 
