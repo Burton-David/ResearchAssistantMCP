@@ -18,7 +18,6 @@ Contributions welcome. Issues tagged [`good first issue`](https://github.com/Bur
 These are refactors, not features. They're small and ship-friendly for a first PR.
 
 - **Extract shared `service/_merge.py`.** `service/library.py` reaches into `service/search.py:_merge_records` for cross-source merging. Service-shared infra should be its own module, not a cross-service private symbol.
-- **Shared tokenization helper.** `_NON_ALNUM_RE` is defined in three places (`service/search.py`, `service/discovery.py`, `reranker/fake.py`) and unicode-normalize-then-split is repeated four times. One `_tokens.py` would centralize.
 
 ## Out of scope (intentional)
 
