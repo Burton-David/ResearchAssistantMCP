@@ -13,12 +13,6 @@ Contributions welcome. Issues tagged [`good first issue`](https://github.com/Bur
 - **Cross-process rate-limit coordination.** Today each process has its own `RateLimiter` / `AdaptiveRateLimiter`. Two research-mcp processes against the same API key can collectively exceed quota. File-lock or shared-state (sqlite, redis) would coordinate. Matters for power users running REPL + Claude Desktop simultaneously.
 - **Token-bucket rate limiting.** `AdaptiveRateLimiter` is minimum-interval-based — no burst tolerance. A token bucket with sliding-window enforcement matches what some upstreams actually enforce. Likely overkill for our throughput; flagged for completeness.
 
-## Code organization
-
-These are refactors, not features. They're small and ship-friendly for a first PR.
-
-- **Extract shared `service/_merge.py`.** `service/library.py` reaches into `service/search.py:_merge_records` for cross-source merging. Service-shared infra should be its own module, not a cross-service private symbol.
-
 ## Out of scope (intentional)
 
 - **Multi-library / `library_id` parameter.** Single library per server keeps the model simple. A user who needs multiple libraries can run multiple MCP server instances against different index paths.
