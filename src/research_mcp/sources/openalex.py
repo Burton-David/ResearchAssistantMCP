@@ -11,10 +11,13 @@ at boot. The wiring layer reads `RESEARCH_MCP_OPENALEX_EMAIL`; if it's
 unset, OpenAlex isn't added to the Source list (no error, just one
 fewer source).
 
-Two `id_prefixes`: `openalex:` (the canonical form, e.g. `openalex:W2626778328`)
-and `doi:`, since OpenAlex's `/works/doi:<doi>` endpoint resolves DOIs
-directly. The `doi:` prefix overlaps with `SemanticScholarSource`; the
-wiring layer's source-list ordering decides who wins on collisions.
+Three `id_prefixes`: `openalex:` (the canonical form, e.g.
+`openalex:W2626778328`), `doi:` (OpenAlex's `/works/doi:<doi>` endpoint
+resolves DOIs directly), and `arxiv:`, which resolves through arXiv's minted
+DOI `10.48550/arXiv.<id>` — OpenAlex indexes works under it, so the
+citation-graph tools work for arXiv-id papers. The `doi:` / `arxiv:` prefixes
+overlap with `SemanticScholarSource`; the wiring layer's source-list ordering
+decides who wins on collisions.
 
 OpenAlex stores abstracts as inverted indices (`{word: [positions]}`)
 rather than plain text — see `_reconstruct_abstract`. This is a
@@ -26,6 +29,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 from collections.abc import Mapping, Sequence
 from datetime import date
 from pathlib import Path
@@ -52,12 +56,37 @@ _DEFAULT_MIN_INTERVAL: Final = 0.1
 # max_results=500 doesn't get a 400 back.
 _MAX_PER_PAGE: Final = 200
 
+# arXiv mints a DOI of the form `10.48550/arXiv.<id>` for its papers, and
+# OpenAlex indexes many works under it — so an `arxiv:` id resolves through
+# that DOI. Papers predating arXiv's DOI program (roughly pre-2022) aren't
+# found and degrade to an empty result, the same as any id OpenAlex doesn't
+# know. The version suffix (`v3`) is stripped — the DOI is version-agnostic.
+_ARXIV_DOI_PREFIX: Final = "10.48550/arXiv."
+_ARXIV_VERSION_RE: Final = re.compile(r"v\d+$")
+
+
+def _works_path(prefix: str, raw: str) -> str | None:
+    """Map a prefixed paper id to an OpenAlex `/works` lookup path.
+
+    Returns None when OpenAlex can't resolve that id form (e.g. an `s2:`
+    corpus id), so callers degrade to an empty result instead of issuing a
+    malformed request.
+    """
+    if prefix == "openalex":
+        return f"/works/{raw}"
+    if prefix == "doi":
+        return f"/works/doi:{raw}"
+    if prefix == "arxiv":
+        bare = _ARXIV_VERSION_RE.sub("", raw)
+        return f"/works/doi:{_ARXIV_DOI_PREFIX}{bare}"
+    return None
+
 
 class OpenAlexSource:
     """A `Source` that fronts the OpenAlex `/works` API."""
 
     name: str = "openalex"
-    id_prefixes: tuple[str, ...] = ("openalex", "doi")
+    id_prefixes: tuple[str, ...] = ("openalex", "doi", "arxiv")
 
     def __init__(
         self,
@@ -105,9 +134,9 @@ class OpenAlexSource:
         prefix, _, raw = paper_id.partition(":")
         if prefix not in self.id_prefixes or not raw:
             return None
-        # Both routes hit /works/<id>; OpenAlex accepts `/works/W123` and
-        # `/works/doi:10.x/y` interchangeably.
-        path = f"/works/{raw}" if prefix == "openalex" else f"/works/doi:{raw}"
+        path = _works_path(prefix, raw)
+        if path is None:
+            return None
         body = await self._fetch_or_none(path)
         if body is None:
             return None
@@ -169,8 +198,9 @@ class OpenAlexSource:
         poison the batch.
 
         Returns an empty tuple when:
-          * the parent id isn't claimable by OpenAlex (`arxiv:`, `s2:`, ...)
-          * the parent doesn't exist in OpenAlex (404)
+          * the parent id isn't claimable by OpenAlex (`s2:`, `pmid:`, ...)
+          * the parent doesn't exist in OpenAlex (404 — e.g. an arXiv paper
+            predating arXiv's DOI program)
           * the requested field is absent, empty, or not a list
 
         Parent-fetch transient errors (5xx after retries / network) propagate
@@ -179,7 +209,9 @@ class OpenAlexSource:
         prefix, _, raw = paper_id.partition(":")
         if prefix not in self.id_prefixes or not raw:
             return ()
-        path = f"/works/{raw}" if prefix == "openalex" else f"/works/doi:{raw}"
+        path = _works_path(prefix, raw)
+        if path is None:
+            return ()
         parent_body = await self._fetch_or_none(path)
         if parent_body is None:
             return ()

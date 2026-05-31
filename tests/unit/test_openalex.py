@@ -36,6 +36,9 @@ def test_openalex_satisfies_source_protocol() -> None:
     # lookups here when openalex is listed before s2.
     assert "openalex" in src.id_prefixes
     assert "doi" in src.id_prefixes
+    # arXiv ids resolve via arXiv's minted DOI, so the citation-graph tools
+    # work for arXiv-id papers.
+    assert "arxiv" in src.id_prefixes
 
 
 def test_openalex_requires_email_at_construction() -> None:
@@ -398,6 +401,23 @@ async def test_fetch_by_doi_uses_works_doi_path(tmp_path: Path) -> None:
     assert captured == ["/works/doi:10.65215/2q58a426"]
 
 
+async def test_fetch_by_arxiv_id_resolves_via_arxiv_doi(tmp_path: Path) -> None:
+    captured: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(request.url.path)
+        return _work_response(_VASWANI_WORK)
+
+    src = _build_source(tmp_path, handler)
+    try:
+        # The version suffix is stripped — arXiv's minted DOI is version-agnostic.
+        paper = await src.fetch("arxiv:1706.03762v5")
+    finally:
+        await src.aclose()
+    assert paper is not None
+    assert captured == ["/works/doi:10.48550/arXiv.1706.03762"]
+
+
 async def test_fetch_with_unknown_prefix_returns_none_without_request(
     tmp_path: Path,
 ) -> None:
@@ -410,7 +430,7 @@ async def test_fetch_with_unknown_prefix_returns_none_without_request(
 
     src = _build_source(tmp_path, handler)
     try:
-        assert await src.fetch("arxiv:1706.03762") is None
+        assert await src.fetch("s2:0123456789") is None
         assert await src.fetch("pmid:12345") is None
         assert await src.fetch("malformed-id") is None
     finally:
@@ -688,8 +708,8 @@ async def test_fetch_referenced_returns_empty_when_field_not_list(
 async def test_fetch_referenced_returns_empty_for_non_claimable_prefix(
     tmp_path: Path,
 ) -> None:
-    """ArXiv- and S2-only ids aren't claimable by OpenAlex's resolver; the
-    method short-circuits without an HTTP call rather than burning a 404."""
+    """S2 corpus ids aren't claimable by OpenAlex's resolver; the method
+    short-circuits without an HTTP call rather than burning a 404."""
     calls = 0
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -699,7 +719,7 @@ async def test_fetch_referenced_returns_empty_for_non_claimable_prefix(
 
     src = _build_source(tmp_path, handler)
     try:
-        result = await src.fetch_referenced("arxiv:1706.03762")
+        result = await src.fetch_referenced("s2:0123456789")
     finally:
         await src.aclose()
     assert result == ()
