@@ -62,7 +62,7 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Literal
 
-import faiss  # type: ignore[import-untyped]  # faiss-cpu has no type stubs
+import faiss  # treated as untyped in mypy config — its py.typed stubs are incomplete
 import numpy as np
 
 from research_mcp.domain.paper import Paper
