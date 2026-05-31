@@ -1,11 +1,12 @@
 """Per-field parameters that override the heuristic scorer's defaults.
 
-Two dimensions get field-aware treatment: **recency** (how fast a paper
-ages out of relevance) and **impact** (the citation-velocity baseline
-we compare against). The other two dimensions stay field-agnostic for
-v1 — venue lists in `_venues.py` already cover top-tier venues across
-all five fields (NEJM, Annals of Math, PRL, NeurIPS, etc.), and the
-author dimension is a placeholder until #1 (h-index integration) lands.
+This module holds the two parameter tables `FieldAwareCitationScorer`
+reads: **recency** half-lives (how fast a paper ages out of relevance)
+and **impact** citation-velocity baselines (what a paper's velocity is
+compared against). Venue stays field-agnostic — the venue lists in
+`_venues.py` already span top-tier venues across all five fields (NEJM,
+Annals of Math, PRL, NeurIPS, etc.). The author dimension is also
+field-aware, but its per-field h-index tiers live in `_author.py`.
 
 Numbers are picked to bracket realistic field differences rather than
 chase precision; a math paper from 2010 SHOULD score about as well as

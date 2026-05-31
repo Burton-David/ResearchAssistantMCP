@@ -14,13 +14,15 @@ What it changes vs base:
     physics 6y, default 5y).
   * `impact` uses a per-field citation-velocity baseline (CS 5, medicine
     10, math 2, physics 8, default 5).
+  * `author` re-scores the strongest author's h-index against the
+    per-field tiers in `_author.py` (the base ran it under `Field.DEFAULT`
+    tiers; the disk cache makes the re-lookup two reads, not two API calls).
   * `factors["field"]` reports the detected field for telemetry.
 
 What it leaves untouched:
   * `venue` (heuristic's venue lists already cover top-tier venues
     across fields — NEJM, Annals of Math, PRL, NeurIPS are all in
     `_venues.py`).
-  * `author` (placeholder, becomes field-aware in #1).
   * `warnings` (heuristic's "very recent" / "predatory venue" /
     "missing metadata" warnings all still fire correctly).
 
