@@ -20,6 +20,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Awaitable, Callable, Sequence
+from dataclasses import replace
 
 from research_mcp.domain.embedder import Embedder
 from research_mcp.domain.index import Index
@@ -27,6 +28,7 @@ from research_mcp.domain.paper import Paper
 from research_mcp.domain.reranker import Reranker
 from research_mcp.domain.source import Source
 from research_mcp.errors import SourceUnavailable
+from research_mcp.pdf import PdfFetcher
 from research_mcp.service._merge import merge_records
 
 _log = logging.getLogger(__name__)
@@ -40,6 +42,11 @@ ProgressCallback = Callable[[int, int, str], Awaitable[None]]
 # When a reranker is configured, fetch this many times the user-requested k
 # from FAISS before reranking. Mirrors the SearchService policy.
 _RECALL_RERANK_POOL_FACTOR = 5
+
+# Max concurrent PDF downloads during a bulk ingest. Bounded so a query-mode
+# ingest of `max_papers` (up to 100) doesn't open that many multi-MiB streams
+# at once; 4 keeps throughput up without hammering open-access hosts.
+_PDF_FETCH_CONCURRENCY = 4
 
 
 async def fetch_from_sources(
@@ -193,6 +200,7 @@ class LibraryService:
         embedder: Embedder,
         ingest_sources: Sequence[Source],
         reranker: Reranker | None = None,
+        pdf_fetcher: PdfFetcher | None = None,
     ) -> None:
         if not ingest_sources:
             raise ValueError("LibraryService requires at least one ingest Source")
@@ -200,6 +208,7 @@ class LibraryService:
         self._embedder = embedder
         self._sources = tuple(ingest_sources)
         self._reranker = reranker
+        self._pdf_fetcher = pdf_fetcher
 
     @property
     def index(self) -> Index:
@@ -237,10 +246,44 @@ class LibraryService:
         return await self.ingest_paper(paper)
 
     async def ingest_paper(self, paper: Paper) -> Paper:
+        paper = await self._maybe_fill_full_text(paper)
         text = _embedding_text(paper)
         [vector] = await self._embedder.embed([text])
         await self._index.upsert([paper], [vector])
         return paper
+
+    async def _maybe_fill_full_text(self, paper: Paper) -> Paper:
+        """Best-effort: populate `full_text` from the paper's PDF.
+
+        Returns the paper unchanged when there's no fetcher, no `pdf_url`,
+        `full_text` is already set, or the fetch yields nothing. Never raises
+        for a PDF problem — the fetcher swallows those; this guard is
+        belt-and-braces so an unexpected bug still can't break ingest.
+        """
+        if self._pdf_fetcher is None or not paper.pdf_url or paper.full_text:
+            return paper
+        try:
+            text = await self._pdf_fetcher.fetch_text(paper.id, paper.pdf_url)
+        except Exception as exc:
+            # Belt-and-braces: the fetcher already swallows PDF-side problems,
+            # so any exception here is an unexpected bug — log it, but never let
+            # it break an ingest that would otherwise succeed on title+abstract.
+            _log.warning("PDF text fetch raised for %s (ignored): %s", paper.id, exc)
+            return paper
+        if not text:
+            return paper
+        return replace(paper, full_text=text)
+
+    async def _fill_full_text_batch(self, papers: list[Paper]) -> list[Paper]:
+        """Enrich a batch with PDF full text, bounded so a large query-mode
+        ingest doesn't open dozens of multi-MiB downloads at once."""
+        sem = asyncio.Semaphore(_PDF_FETCH_CONCURRENCY)
+
+        async def _one(paper: Paper) -> Paper:
+            async with sem:
+                return await self._maybe_fill_full_text(paper)
+
+        return list(await asyncio.gather(*(_one(p) for p in papers)))
 
     async def bulk_ingest(
         self,
@@ -271,6 +314,8 @@ class LibraryService:
             unique.append(p)
         if not unique:
             return ()
+        if self._pdf_fetcher is not None:
+            unique = await self._fill_full_text_batch(unique)
         n = len(unique)
         texts = [_embedding_text(p) for p in unique]
         if progress is not None:

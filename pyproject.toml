@@ -50,10 +50,14 @@ dev = [
     "ruff>=0.4",
     "mypy>=1.10",
     "ipython>=8.20",
+    # Builds real fixture PDFs in-test for the pdf-fetcher suite (BSD-licensed).
+    "reportlab>=4.0",
 ]
 sentence-transformers = ["sentence-transformers>=2.7"]
 claim-extraction = ["spacy>=3.7"]
 paper-analysis = ["anthropic>=0.40"]
+# pdfplumber (MIT, on pdfminer.six) extracts PDF body text for full-text ingest.
+pdf = ["pdfplumber>=0.11"]
 
 [project.scripts]
 research-mcp = "research_mcp.cli:main"
@@ -102,6 +106,8 @@ module = [
     "spacy.*",
     "defusedxml",
     "defusedxml.*",
+    "pdfplumber",
+    "pdfplumber.*",
 ]
 ignore_missing_imports = true
 

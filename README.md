@@ -75,6 +75,12 @@ export RESEARCH_MCP_EMBEDDER="sentence-transformers:BAAI/bge-base-en-v1.5"
 # Either way, set where the FAISS index lives:
 export RESEARCH_MCP_INDEX_PATH=~/research_index
 
+# Optional: extract PDF full text during ingest for finer-grained recall and
+# richer analyze_paper output. When pdfplumber is installed, ingest fetches a
+# paper's open-access PDF and stores its body text; without it, ingest uses
+# title + abstract. Auto-enabled when present; RESEARCH_MCP_DISABLE_PDF=1 opts out.
+pip install -e ".[pdf]"
+
 # Optional source / quality knobs:
 export SEMANTIC_SCHOLAR_API_KEY=...           # raises S2 rate limit
 export RESEARCH_MCP_S2_SHARED_RATELIMIT=1      # share S2's rate limit across processes (POSIX)

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pytest
 
 from research_mcp.domain.paper import Author, Paper
@@ -492,3 +494,86 @@ async def test_bulk_ingest_empty_input_emits_no_progress() -> None:
 
     assert await library.bulk_ingest([], progress=record) == ()
     assert events == []
+
+
+class _StubPdfFetcher:
+    """Deterministic PdfFetcher test double — maps pdf_url → text."""
+
+    def __init__(
+        self, mapping: dict[str, str | None] | None = None, *, raises: bool = False
+    ) -> None:
+        self._mapping = mapping or {}
+        self._raises = raises
+        self.calls = 0
+
+    async def fetch_text(self, paper_id: str, pdf_url: str) -> str | None:
+        self.calls += 1
+        if self._raises:
+            raise RuntimeError("simulated PDF failure")
+        return self._mapping.get(pdf_url)
+
+
+def _library_with_pdf(pdf_fetcher: object | None) -> LibraryService:
+    embedder = FakeEmbedder(32)
+    return LibraryService(
+        index=MemoryIndex(embedder.dimension),
+        embedder=embedder,
+        ingest_sources=[StaticSource("arxiv", [])],
+        pdf_fetcher=pdf_fetcher,  # type: ignore[arg-type]
+    )
+
+
+async def test_ingest_fills_full_text_from_pdf(vaswani_paper: Paper) -> None:
+    paper = replace(vaswani_paper, pdf_url="https://example.org/v.pdf", full_text=None)
+    fetcher = _StubPdfFetcher({"https://example.org/v.pdf": "FULL BODY TEXT"})
+    library = _library_with_pdf(fetcher)
+    out = await library.ingest_paper(paper)
+    assert out.full_text == "FULL BODY TEXT"
+    assert fetcher.calls == 1
+
+
+async def test_ingest_degrades_when_pdf_fetcher_returns_none(vaswani_paper: Paper) -> None:
+    paper = replace(vaswani_paper, pdf_url="https://example.org/v.pdf", full_text=None)
+    library = _library_with_pdf(_StubPdfFetcher({"https://example.org/v.pdf": None}))
+    out = await library.ingest_paper(paper)
+    assert out.full_text is None
+    assert await library.count() == 1  # ingest still succeeded
+
+
+async def test_ingest_degrades_when_pdf_fetcher_raises(vaswani_paper: Paper) -> None:
+    paper = replace(vaswani_paper, pdf_url="https://example.org/v.pdf", full_text=None)
+    library = _library_with_pdf(_StubPdfFetcher(raises=True))
+    out = await library.ingest_paper(paper)
+    assert out.full_text is None
+    assert await library.count() == 1
+
+
+async def test_ingest_without_pdf_fetcher_leaves_full_text_none(vaswani_paper: Paper) -> None:
+    paper = replace(vaswani_paper, pdf_url="https://example.org/v.pdf", full_text=None)
+    library = _library_with_pdf(None)  # default — no PDF fetching
+    out = await library.ingest_paper(paper)
+    assert out.full_text is None
+
+
+async def test_ingest_does_not_refetch_when_full_text_present(vaswani_paper: Paper) -> None:
+    paper = replace(vaswani_paper, pdf_url="https://example.org/v.pdf", full_text="already here")
+    fetcher = _StubPdfFetcher({"https://example.org/v.pdf": "SHOULD NOT BE USED"})
+    library = _library_with_pdf(fetcher)
+    out = await library.ingest_paper(paper)
+    assert out.full_text == "already here"
+    assert fetcher.calls == 0
+
+
+async def test_bulk_ingest_fills_full_text_for_each(
+    vaswani_paper: Paper, bert_paper: Paper
+) -> None:
+    a = replace(vaswani_paper, pdf_url="https://example.org/a.pdf", full_text=None)
+    b = replace(bert_paper, pdf_url="https://example.org/b.pdf", full_text=None)
+    fetcher = _StubPdfFetcher(
+        {"https://example.org/a.pdf": "BODY A", "https://example.org/b.pdf": "BODY B"}
+    )
+    library = _library_with_pdf(fetcher)
+    out = await library.bulk_ingest([a, b])
+    by_id = {p.id: p.full_text for p in out}
+    assert by_id[a.id] == "BODY A"
+    assert by_id[b.id] == "BODY B"
