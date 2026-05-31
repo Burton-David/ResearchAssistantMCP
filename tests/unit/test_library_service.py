@@ -442,3 +442,53 @@ async def test_fetch_with_enrichment_returns_none_when_primary_missing() -> None
     assert await fetch_with_enrichment(
         [_NoneSource()], "arxiv:9"  # type: ignore[list-item]
     ) is None
+
+
+async def test_bulk_ingest_reports_progress(
+    vaswani_paper: Paper, bert_paper: Paper
+) -> None:
+    embedder = FakeEmbedder(32)
+    library = LibraryService(
+        index=MemoryIndex(embedder.dimension),
+        embedder=embedder,
+        ingest_sources=[StaticSource("arxiv", [])],
+    )
+    events: list[tuple[int, int, str]] = []
+
+    async def record(done: int, total: int, message: str) -> None:
+        events.append((done, total, message))
+
+    await library.bulk_ingest([vaswani_paper, bert_paper], progress=record)
+
+    # Two papers → embed phase 0/3, index phase 2/3, done 3/3.
+    assert [(done, total) for done, total, _ in events] == [(0, 3), (2, 3), (3, 3)]
+    assert "embedding" in events[0][2]
+    assert "indexing" in events[1][2]
+    assert "ingested" in events[2][2]
+
+
+async def test_bulk_ingest_without_progress_callback(vaswani_paper: Paper) -> None:
+    embedder = FakeEmbedder(32)
+    library = LibraryService(
+        index=MemoryIndex(embedder.dimension),
+        embedder=embedder,
+        ingest_sources=[StaticSource("arxiv", [])],
+    )
+    ingested = await library.bulk_ingest([vaswani_paper])
+    assert [p.id for p in ingested] == [vaswani_paper.id]
+
+
+async def test_bulk_ingest_empty_input_emits_no_progress() -> None:
+    embedder = FakeEmbedder(32)
+    library = LibraryService(
+        index=MemoryIndex(embedder.dimension),
+        embedder=embedder,
+        ingest_sources=[StaticSource("arxiv", [])],
+    )
+    events: list[tuple[int, int, str]] = []
+
+    async def record(done: int, total: int, message: str) -> None:
+        events.append((done, total, message))
+
+    assert await library.bulk_ingest([], progress=record) == ()
+    assert events == []

@@ -644,7 +644,10 @@ def build_server(
                     "`paper_id` to ingest one specific paper, or pass "
                     "`query` (with optional `max_papers`, `year_min`, "
                     "`year_max`) to search all configured sources and "
-                    "bulk-ingest the top-N. Requires an embedder; see "
+                    "bulk-ingest the top-N. Query mode streams progress "
+                    "notifications when the client supplies a progressToken — "
+                    "the LLM sees 'embedding 20 papers' / 'indexing' updates "
+                    "as the ingest runs. Requires an embedder; see "
                     "library_status if unsure whether the server is "
                     "configured for ingest."
                 ),
@@ -833,6 +836,13 @@ def build_server(
             ingested: list[Paper] = [paper]
         else:
             assert args.query is not None  # enforced by IngestPaperInput validator
+            # Query mode is the long-running path (search + batched embed +
+            # upsert). Stream progress when the client passed a progressToken
+            # so it isn't a silent 30-60s block. Single-id mode above is
+            # sub-second and doesn't bother.
+            progress_cb = _maybe_progress_callback(server)
+            if progress_cb is not None:
+                await progress_cb(0, 1, f"searching for {args.query!r}...")
             outcome = await search.search(
                 SearchQuery(
                     text=args.query,
@@ -844,8 +854,12 @@ def build_server(
             partial_failures = list(outcome.partial_failures)
             result_ids = [r.paper.id for r in outcome.results]
             already_present_pre = await library.contains(result_ids)
+            if progress_cb is not None and not outcome.results:
+                await progress_cb(1, 1, "no papers found")
             ingested = list(
-                await library.bulk_ingest([r.paper for r in outcome.results])
+                await library.bulk_ingest(
+                    [r.paper for r in outcome.results], progress=progress_cb
+                )
             )
         t_after_ingest = time.monotonic()
         newly_added = sum(1 for p in ingested if p.id not in already_present_pre)

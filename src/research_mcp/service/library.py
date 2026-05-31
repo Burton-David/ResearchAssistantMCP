@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Sequence
+from collections.abc import Awaitable, Callable, Sequence
 
 from research_mcp.domain.embedder import Embedder
 from research_mcp.domain.index import Index
@@ -30,6 +30,12 @@ from research_mcp.errors import SourceUnavailable
 from research_mcp.service._merge import merge_records
 
 _log = logging.getLogger(__name__)
+
+# Callback shape: (completed, total, message) → awaitable, mirroring
+# DraftService's. `None` disables reporting. Used by bulk_ingest so a
+# query-mode ingest_paper streams its embed/index phases instead of
+# blocking silently for 30-60s.
+ProgressCallback = Callable[[int, int, str], Awaitable[None]]
 
 # When a reranker is configured, fetch this many times the user-requested k
 # from FAISS before reranking. Mirrors the SearchService policy.
@@ -236,7 +242,12 @@ class LibraryService:
         await self._index.upsert([paper], [vector])
         return paper
 
-    async def bulk_ingest(self, papers: Sequence[Paper]) -> Sequence[Paper]:
+    async def bulk_ingest(
+        self,
+        papers: Sequence[Paper],
+        *,
+        progress: ProgressCallback | None = None,
+    ) -> Sequence[Paper]:
         """Ingest multiple papers in one batched embedder call.
 
         ingest_paper hits the embedder once per paper; for a 20-paper
@@ -244,6 +255,12 @@ class LibraryService:
         embedding inputs into a single call (most embedders accept a
         list and price by token, not request), then a single index
         upsert. Empty input is a no-op.
+
+        When `progress` is supplied it reports the embed and index phases
+        so a query-mode ingest streams live updates. The embedder call is
+        a single batched request, so progress advances by phase — 0/(N+1)
+        while embedding all N, N/(N+1) while indexing — rather than ticking
+        once per paper (which would misrepresent one atomic embed call).
         """
         unique: list[Paper] = []
         seen: set[str] = set()
@@ -254,9 +271,16 @@ class LibraryService:
             unique.append(p)
         if not unique:
             return ()
+        n = len(unique)
         texts = [_embedding_text(p) for p in unique]
+        if progress is not None:
+            await progress(0, n + 1, f"embedding {n} paper(s)...")
         vectors = await self._embedder.embed(texts)
+        if progress is not None:
+            await progress(n, n + 1, f"indexing {n} paper(s)...")
         await self._index.upsert(unique, vectors)
+        if progress is not None:
+            await progress(n + 1, n + 1, f"ingested {n} paper(s)")
         return tuple(unique)
 
     async def recall(self, query: str, k: int = 10) -> Sequence[tuple[Paper, float]]:
