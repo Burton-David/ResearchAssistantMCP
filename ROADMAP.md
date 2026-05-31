@@ -10,7 +10,6 @@ Contributions welcome. Issues tagged [`good first issue`](https://github.com/Bur
 
 ## Infrastructure
 
-- **Cross-process rate-limit coordination.** Today each process has its own `RateLimiter` / `AdaptiveRateLimiter`. Two research-mcp processes against the same API key can collectively exceed quota. File-lock or shared-state (sqlite, redis) would coordinate. Matters for power users running REPL + Claude Desktop simultaneously.
 - **Token-bucket rate limiting.** `AdaptiveRateLimiter` is minimum-interval-based — no burst tolerance. A token bucket with sliding-window enforcement matches what some upstreams actually enforce. Likely overkill for our throughput; flagged for completeness.
 
 ## Out of scope (intentional)

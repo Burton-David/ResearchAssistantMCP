@@ -15,7 +15,7 @@ import os
 from collections.abc import Sequence
 from datetime import date
 from pathlib import Path
-from typing import Any, Final
+from typing import TYPE_CHECKING, Any, Final
 
 import httpx
 
@@ -25,6 +25,9 @@ from research_mcp.errors import SourceUnavailable
 from research_mcp.sources._backoff import with_backoff
 from research_mcp.sources._cache import DiskCache
 from research_mcp.sources._rate_limit import AdaptiveRateLimiter
+
+if TYPE_CHECKING:
+    from research_mcp.sources._rate_limit_shared import SharedAdaptiveRateLimiter
 
 _log = logging.getLogger(__name__)
 
@@ -112,7 +115,21 @@ class SemanticScholarSource:
         # Static interval can't recover from that; adaptive doubles
         # on each 429 and decays back on success — same baseline (1.0s),
         # but headroom when S2 is being strict.
-        self._rate = AdaptiveRateLimiter(interval)
+        #
+        # Opt into cross-process coordination (one shared interval across
+        # every research-mcp process using this key) with
+        # RESEARCH_MCP_S2_SHARED_RATELIMIT=1. POSIX only; off by default so
+        # the test suite never touches the shared ~/.cache state.
+        if os.environ.get("RESEARCH_MCP_S2_SHARED_RATELIMIT") == "1":
+            from research_mcp.sources._rate_limit_shared import (
+                SharedAdaptiveRateLimiter,
+            )
+
+            self._rate: AdaptiveRateLimiter | SharedAdaptiveRateLimiter = (
+                SharedAdaptiveRateLimiter(interval, source=self.name)
+            )
+        else:
+            self._rate = AdaptiveRateLimiter(interval)
         self._owns_client = client is None
         self._client = client or httpx.AsyncClient(timeout=_DEFAULT_TIMEOUT)
 
