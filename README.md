@@ -6,13 +6,12 @@ A citation-finding research assistant for scientists, exposed as an MCP server. 
 
 ```
 assist_draft text="""
-Recent transformer models have outperformed LSTMs on machine translation
-tasks, and self-attention enables parallel computation across positions.
-The proposed architecture achieves 28.4 BLEU on WMT 2014 EN-DE.
+We employed a transformer-based approach to machine translation, which
+outperformed the LSTM baseline. Accuracy improved by 12% over prior work.
 """
 ```
 
-→ extracts three claims (one comparative, one methodological, one statistical), runs each through search across all configured sources, scores candidates on four dimensions — venue (peer-review tier, 30 pts), impact (citation count + velocity, 35 pts), author (max h-index across authors, 25 pts), recency (log-decay; foundational papers exempt, 10 pts) — and returns ranked recommendations with the reasoning a researcher could show to a co-author. One MCP call, full pipeline.
+→ extracts three claims (one methodological, one comparative, one statistical), runs each through search across all configured sources, scores candidates on four dimensions — venue (peer-review tier, 30 pts), impact (citation count + velocity, 35 pts), author (max h-index across authors, 25 pts), recency (log-decay; foundational papers exempt, 10 pts) — and returns ranked recommendations with the reasoning a researcher could show to a co-author. One MCP call, full pipeline.
 
 ## Why
 
@@ -91,6 +90,13 @@ export RESEARCH_MCP_RERANKER="cross-encoder:BAAI/bge-reranker-base"
 export RESEARCH_MCP_ANALYSIS_MODEL="openai:gpt-4o-mini"
 # or: export RESEARCH_MCP_ANALYSIS_MODEL="anthropic:claude-haiku-4-5-20251001"
 
+# Optional: swap the default spaCy claim extractor and field-aware citation
+# scorer for LLM-backed variants (the spaCy + field-aware-heuristic defaults
+# are free and offline). The LLM scorer adds claim-to-paper relevance on top
+# of the field-aware quality score; the LLM extractor reads the draft directly.
+export RESEARCH_MCP_CLAIM_EXTRACTOR="llm:anthropic:claude-haiku-4-5-20251001"
+export RESEARCH_MCP_CITATION_SCORER="llm:anthropic:claude-haiku-4-5-20251001"
+
 research-mcp serve                         # stdio MCP server
 research-mcp repl                          # IPython with abstractions wired
 ```
@@ -126,9 +132,9 @@ Index             where ingested papers live     (faiss, in-memory, pluggable)
 Embedder          how text becomes vectors       (openai, sentence-transformers)
 CitationRenderer  how a paper becomes a string   (ama, apa, bibtex, mla, chicago)
 Reranker          how candidates get rescored    (hf-cross-encoder, optional)
-ClaimExtractor    draft text → typed claims      (spacy, fake; LLM extractor planned)
+ClaimExtractor    draft text → typed claims      (spacy, openai, anthropic, fake)
 Chunker           paper → section-aware chunks   (section-aware, simple, fake)
-CitationScorer    paper → quality breakdown      (heuristic; LLM-based planned)
+CitationScorer    paper → quality breakdown      (field-aware, heuristic, llm, fake)
 PaperAnalyzer     paper → structured analysis    (openai, anthropic, fake)
 ```
 
