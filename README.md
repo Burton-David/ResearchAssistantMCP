@@ -77,6 +77,7 @@ export RESEARCH_MCP_INDEX_PATH=~/research_index
 
 # Optional source / quality knobs:
 export SEMANTIC_SCHOLAR_API_KEY=...           # raises S2 rate limit
+export RESEARCH_MCP_S2_SHARED_RATELIMIT=1      # share S2's rate limit across processes (POSIX)
 export NCBI_API_KEY=...                        # raises PubMed rate limit (3 → 10/sec)
 export RESEARCH_MCP_OPENALEX_EMAIL=you@lab.edu # opt in to OpenAlex
 export RESEARCH_MCP_DISABLE_PUBMED=1           # opt OUT of PubMed (default: on)
