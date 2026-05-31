@@ -27,7 +27,7 @@ from research_mcp.domain.paper import Paper
 from research_mcp.domain.reranker import Reranker
 from research_mcp.domain.source import Source
 from research_mcp.errors import SourceUnavailable
-from research_mcp.service.search import _merge_records
+from research_mcp.service._merge import merge_records
 
 _log = logging.getLogger(__name__)
 
@@ -165,7 +165,7 @@ async def fetch_with_enrichment(
     enriched = primary
     for r in results:
         if isinstance(r, Paper) and r.id != primary.id:
-            enriched = _merge_records(enriched, r)
+            enriched = merge_records(enriched, r)
     return enriched
 
 
