@@ -105,6 +105,18 @@ module = [
 ]
 ignore_missing_imports = true
 
+# faiss-cpu ships a py.typed marker, but its bundled type information is
+# incomplete — IndexIDMap2.id_map, remove_ids' ndarray argument, and the
+# IndexHNSWFlat/IndexFlatIP construction union are all unmodeled, so strict
+# mypy flags correct runtime calls. `ignore_missing_imports` is a no-op once a
+# package is py.typed; `follow_imports = skip` is what actually restores the
+# "treat faiss as untyped" behavior, and keeps the gate green across faiss-cpu
+# releases (older versions shipped no stubs at all).
+[[tool.mypy.overrides]]
+module = ["faiss", "faiss.*"]
+follow_imports = "skip"
+follow_imports_for_stubs = true
+
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
