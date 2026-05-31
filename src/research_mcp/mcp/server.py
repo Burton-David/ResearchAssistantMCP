@@ -87,6 +87,7 @@ from research_mcp.mcp.tools import (
     paper_to_summary,
     source_from_id,
 )
+from research_mcp.pdf import HttpPdfFetcher
 from research_mcp.reranker import HuggingFaceCrossEncoderReranker
 from research_mcp.service import DiscoveryService, LibraryService, SearchService
 from research_mcp.service.analysis import AnalysisService
@@ -1344,6 +1345,27 @@ def _configure_logging() -> None:
     pkg_log.setLevel(logging.INFO)
 
 
+def _select_pdf_fetcher() -> HttpPdfFetcher | None:
+    """Construct the PDF full-text fetcher, or None to skip PDF ingest.
+
+    Enabled automatically when the optional `pdfplumber` extra is importable —
+    populating `full_text` is the whole point of the feature, so a missing
+    second opt-in would make it a silent no-op for most users. Disable with
+    `RESEARCH_MCP_DISABLE_PDF=1`, mirroring `RESEARCH_MCP_DISABLE_PUBMED`.
+    """
+    if os.environ.get("RESEARCH_MCP_DISABLE_PDF") == "1":
+        return None
+    try:
+        import pdfplumber  # noqa: F401  — probe the optional extra
+    except ImportError:
+        _log.info(
+            "pdfplumber not installed; PDF full-text ingest disabled "
+            "(pip install 'research-mcp[pdf]' to enable)"
+        )
+        return None
+    return HttpPdfFetcher()
+
+
 async def run_default() -> None:
     """Production wiring: real arXiv + S2; embedder selected from env.
 
@@ -1377,6 +1399,7 @@ async def run_default() -> None:
     library: LibraryService | None = None
     index_to_close: FaissIndex | None = None
     index_type_label: str | None = None
+    pdf_fetcher: HttpPdfFetcher | None = None
     if embedder is not None:
         index_path = os.environ.get("RESEARCH_MCP_INDEX_PATH")
         if not index_path:
@@ -1391,11 +1414,13 @@ async def run_default() -> None:
         )
         index_to_close = index
         index_type_label = index.index_type
+        pdf_fetcher = _select_pdf_fetcher()
         library = LibraryService(
             index=index,
             embedder=embedder,
             ingest_sources=sources,
             reranker=reranker,
+            pdf_fetcher=pdf_fetcher,
         )
     else:
         _log.warning("no embedder configured: %s", _NO_EMBEDDER_HINT)
@@ -1452,6 +1477,8 @@ async def run_default() -> None:
             await pubmed.aclose()
         if openalex is not None:
             await openalex.aclose()
+        if pdf_fetcher is not None:
+            await pdf_fetcher.aclose()
         if index_to_close is not None:
             index_to_close.close()
 

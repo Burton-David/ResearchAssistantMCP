@@ -41,13 +41,17 @@ jobs:
         # the build helper without the model, so we also download
         # `en_core_web_sm` (~13MB) in the next step.
         #
+        # `pdf` brings pdfplumber (lightweight — pdfminer.six, no torch) so the
+        # PDF full-text ingest tests exercise real extraction rather than just
+        # the graceful-degrade path.
+        #
         # `sentence-transformers` (~700MB w/ torch) is intentionally
         # left out — its heavy code paths are lazy-imported and the
         # unit tests use Fake* implementations. The integration tests
         # stay skipped behind RESEARCH_MCP_* env-var gates.
         run: |
           python -m pip install --upgrade pip
-          pip install -e ".[dev,paper-analysis,claim-extraction]"
+          pip install -e ".[dev,paper-analysis,claim-extraction,pdf]"
 
       - name: Download spaCy model
         run: python -m spacy download en_core_web_sm
