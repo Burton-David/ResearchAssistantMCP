@@ -2,7 +2,7 @@
 
 import os
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 # Mac-specific guardrail: faiss-cpu and torch (under sentence-transformers)
 # each ship their own libomp.dylib. Intel's OpenMP runtime aborts the
