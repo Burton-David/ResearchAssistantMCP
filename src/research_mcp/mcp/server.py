@@ -1,6 +1,6 @@
 """MCP stdio server.
 
-Wires sources, embedder, index, and the citation registry into the six
+Wires sources, embedder, index, and the citation registry into the
 tool handlers. Default wiring uses real arXiv + Semantic Scholar; the
 embedder is selected by `RESEARCH_MCP_EMBEDDER` (or auto-falls-back to
 OpenAI if `OPENAI_API_KEY` is set). When no embedder is configured, the
@@ -47,6 +47,12 @@ from research_mcp.embedder import (
 )
 from research_mcp.errors import SourceUnavailable
 from research_mcp.index import FaissIndex, MemoryIndex
+from research_mcp.mcp.registry import (
+    ToolHandlers,
+    advertise,
+    build_specs,
+    dispatch_table,
+)
 from research_mcp.mcp.tools import (
     AnalyzePaperInput,
     AnalyzePaperOutput,
@@ -623,180 +629,6 @@ def build_server(
             ],
         )
 
-    # mcp SDK ships its decorators as untyped at the moment.
-    @server.list_tools()  # type: ignore[no-untyped-call,untyped-decorator]
-    async def list_tools() -> list[mcp_types.Tool]:
-        return [
-            mcp_types.Tool(
-                name="search_papers",
-                description=(
-                    "Search arXiv and Semantic Scholar in parallel and return "
-                    "deduplicated, cross-source-enriched metadata for each "
-                    "paper. Each result carries a `source` field naming which "
-                    "adapter(s) contributed."
-                ),
-                inputSchema=SearchPapersInput.model_json_schema(),
-            ),
-            mcp_types.Tool(
-                name="ingest_paper",
-                description=(
-                    "Add papers to the local FAISS-backed library so they "
-                    "can be recalled by similarity. Two modes: pass "
-                    "`paper_id` to ingest one specific paper, or pass "
-                    "`query` (with optional `max_papers`, `year_min`, "
-                    "`year_max`) to search all configured sources and "
-                    "bulk-ingest the top-N. Query mode streams progress "
-                    "notifications when the client supplies a progressToken — "
-                    "the LLM sees 'embedding 20 papers' / 'indexing' updates "
-                    "as the ingest runs. Requires an embedder; see "
-                    "library_status if unsure whether the server is "
-                    "configured for ingest."
-                ),
-                inputSchema=IngestPaperInput.model_json_schema(),
-            ),
-            mcp_types.Tool(
-                name="library_search",
-                description=(
-                    "Semantic search across the local library; returns the top-k "
-                    "ingested papers with similarity scores. Requires an "
-                    "embedder."
-                ),
-                inputSchema=LibrarySearchInput.model_json_schema(),
-            ),
-            mcp_types.Tool(
-                name="cite_paper",
-                description=(
-                    "Render a citation for a paper id. Fetches metadata from "
-                    "the originating source on demand — does not require the "
-                    "paper to be ingested first. Defaults to AMA; supports "
-                    "APA, MLA, Chicago, and BibTeX."
-                ),
-                inputSchema=CitePaperInput.model_json_schema(),
-            ),
-            mcp_types.Tool(
-                name="library_status",
-                description=(
-                    "Report library state: paper count, configured embedder, "
-                    "any setup hints. Use to verify the server is wired for "
-                    "ingest before attempting one."
-                ),
-                inputSchema=LibraryStatusInput.model_json_schema(),
-            ),
-            mcp_types.Tool(
-                name="get_paper",
-                description=(
-                    "Fetch full Paper metadata for an id without ingesting. "
-                    "Useful as a preview step before deciding whether to "
-                    "commit to embedding the paper into the local library."
-                ),
-                inputSchema=GetPaperInput.model_json_schema(),
-            ),
-            mcp_types.Tool(
-                name="find_paper",
-                description=(
-                    "Find a paper by title (and optional author names) when "
-                    "you don't have a canonical id. Returns at most three "
-                    "candidates ranked by title-token similarity with a "
-                    "confidence score. Use this to bridge from a citation "
-                    "you've read about to an id you can ingest or cite."
-                ),
-                inputSchema=FindPaperInput.model_json_schema(),
-            ),
-            mcp_types.Tool(
-                name="extract_claims",
-                description=(
-                    "Scan draft text and identify claims that need citations: "
-                    "statistical (percentages, p-values, sample sizes), "
-                    "methodological (techniques, algorithms), comparative "
-                    "(outperforms / better than), causal, and theoretical. "
-                    "Each claim carries its type, a confidence score, the "
-                    "surrounding context, and suggested search terms — feed "
-                    "those into search_papers / find_citations to find the "
-                    "papers worth citing."
-                ),
-                inputSchema=ExtractClaimsInput.model_json_schema(),
-            ),
-            mcp_types.Tool(
-                name="find_citations",
-                description=(
-                    "Given a Claim (typically from extract_claims), search "
-                    "all configured sources, score each candidate by venue + "
-                    "impact + recency, and return the top-k recommended "
-                    "citations. Each candidate carries its full quality "
-                    "breakdown, not just a total — so the user can see WHY "
-                    "a paper ranked where it did."
-                ),
-                inputSchema=FindCitationsInput.model_json_schema(),
-            ),
-            mcp_types.Tool(
-                name="explain_citation",
-                description=(
-                    "Produce a human-readable recommendation for citing a "
-                    "specific paper as evidence for a specific claim. "
-                    "Returns a strong/moderate/weak verdict plus the "
-                    "venue + impact + recency reasoning the user can show "
-                    "to a co-author or reviewer."
-                ),
-                inputSchema=ExplainCitationInput.model_json_schema(),
-            ),
-            mcp_types.Tool(
-                name="analyze_paper",
-                description=(
-                    "Use an LLM to extract structured analysis of a paper: "
-                    "summary, key contributions, methodology, technical "
-                    "approach, limitations, future directions, datasets, "
-                    "metrics, and baselines. Pass `kinds` to limit which "
-                    "fields are extracted (saves output tokens). Backed "
-                    "by OpenAI gpt-4o-mini or Anthropic claude-haiku, "
-                    "selected via RESEARCH_MCP_ANALYSIS_MODEL."
-                ),
-                inputSchema=AnalyzePaperInput.model_json_schema(),
-            ),
-            mcp_types.Tool(
-                name="assist_draft",
-                description=(
-                    "End-to-end citation assistant: paste a draft paragraph, "
-                    "get a list of recommended citations per claim. The "
-                    "pipeline extracts typed claims, finds candidate papers "
-                    "across all configured sources (arXiv, Semantic Scholar, "
-                    "PubMed, OpenAlex), scores each by venue + impact + "
-                    "recency, and returns ranked recommendations with "
-                    "human-readable explanations. Streams progress "
-                    "notifications when the client supplies a "
-                    "progressToken — the LLM sees 'claim 3/8 done' "
-                    "messages as the pipeline runs."
-                ),
-                inputSchema=AssistDraftInput.model_json_schema(),
-            ),
-            mcp_types.Tool(
-                name="find_referenced_by",
-                description=(
-                    "Walk OpenAlex's outgoing citation graph: return up to "
-                    "`max_results` papers that the given paper cites. The "
-                    "source paper id must be OpenAlex- or DOI-prefixed "
-                    "(e.g. 'openalex:W2741809807', 'doi:10.1038/nature12373') "
-                    "because referenced_works is an OpenAlex-only signal — "
-                    "arXiv- and S2-only ids aren't supported. Requires "
-                    "RESEARCH_MCP_OPENALEX_EMAIL to be set; the tool refuses "
-                    "with a hint otherwise."
-                ),
-                inputSchema=FindReferencedByInput.model_json_schema(),
-            ),
-            mcp_types.Tool(
-                name="find_related",
-                description=(
-                    "Return OpenAlex's similarity-neighborhood for the given "
-                    "paper. Unlike `find_referenced_by`, this isn't a "
-                    "deterministic citation graph — `related_works` is "
-                    "computed by OpenAlex from topic-vector similarity, so "
-                    "treat results as 'papers OpenAlex thinks are adjacent' "
-                    "rather than 'papers this one cites'. Same prefix rules "
-                    "and email requirement as find_referenced_by."
-                ),
-                inputSchema=FindRelatedInput.model_json_schema(),
-            ),
-        ]
-
     async def _do_search(arguments: dict[str, Any]) -> dict[str, Any]:
         args = SearchPapersInput.model_validate(arguments)
         outcome = await search.search(
@@ -1210,22 +1042,31 @@ def build_server(
             ],
         ).model_dump()
 
-    handlers: dict[str, Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]] = {
-        "search_papers": _do_search,
-        "ingest_paper": _do_ingest,
-        "library_search": _do_recall,
-        "cite_paper": _do_cite,
-        "library_status": _do_status,
-        "get_paper": _do_get_paper,
-        "find_paper": _do_find_paper,
-        "extract_claims": _do_extract_claims,
-        "find_citations": _do_find_citations,
-        "explain_citation": _do_explain_citation,
-        "analyze_paper": _do_analyze_paper,
-        "assist_draft": _do_assist_draft,
-        "find_referenced_by": _do_find_referenced_by,
-        "find_related": _do_find_related,
-    }
+    specs = build_specs(
+        ToolHandlers(
+            search_papers=_do_search,
+            ingest_paper=_do_ingest,
+            library_search=_do_recall,
+            cite_paper=_do_cite,
+            library_status=_do_status,
+            get_paper=_do_get_paper,
+            find_paper=_do_find_paper,
+            extract_claims=_do_extract_claims,
+            find_citations=_do_find_citations,
+            explain_citation=_do_explain_citation,
+            analyze_paper=_do_analyze_paper,
+            assist_draft=_do_assist_draft,
+            find_referenced_by=_do_find_referenced_by,
+            find_related=_do_find_related,
+        )
+    )
+
+    # mcp SDK ships its decorators as untyped at the moment.
+    @server.list_tools()  # type: ignore[no-untyped-call,untyped-decorator]
+    async def list_tools() -> list[mcp_types.Tool]:
+        return advertise(specs)
+
+    handlers = dispatch_table(specs)
 
     # validate_input=False bypasses the mcp SDK's strict jsonschema check so
     # pydantic — which is doing the same job inside each handler — gets first
