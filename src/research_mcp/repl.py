@@ -158,8 +158,7 @@ def main(argv: list[str] | None = None) -> None:
     config = Config()
     config.InteractiveShellApp.exec_lines = ["%autoawait asyncio"]
     config.TerminalInteractiveShell.banner2 = banner
-    # IPython's public entry point lacks complete type stubs.
-    start_ipython(argv=args, user_ns=namespace, config=config)  # type: ignore[no-untyped-call]
+    start_ipython(argv=args, user_ns=namespace, config=config)
 
 
 if __name__ == "__main__":

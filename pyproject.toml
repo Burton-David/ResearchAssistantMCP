@@ -27,7 +27,11 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Information Analysis",
 ]
 dependencies = [
-    "mcp>=0.9.0",
+    # Capped below 2.0. The 2.x line renames Tool's inputSchema field,
+    # narrows Server to a single type parameter, and moves the request
+    # decorators off Server, which breaks this server at runtime. Lift the
+    # cap together with the migration, not before it.
+    "mcp>=1.2,<2",
     "httpx>=0.27",
     "pydantic>=2.7",
     "faiss-cpu>=1.8",
@@ -87,6 +91,15 @@ python_version = "3.11"
 strict = true
 warn_unused_ignores = true
 warn_redundant_casts = true
+
+# numpy ships PEP 695 `type` statements in its stubs, which mypy refuses to
+# parse while python_version targets anything below 3.12, aborting before it
+# checks any project source. numpy is used here only to hand vectors to faiss,
+# so skip its stubs rather than raise the target version and stop checking 3.11.
+[[tool.mypy.overrides]]
+module = ["numpy", "numpy.*"]
+follow_imports = "skip"
+follow_imports_for_stubs = true
 
 # Optional runtime dependencies — lazy-imported inside the modules that
 # use them, with try/except ImportError so a fresh checkout without the
