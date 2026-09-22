@@ -1,5 +1,9 @@
 # research-mcp
 
+[![CI](https://github.com/Burton-David/ResearchAssistantMCP/actions/workflows/ci.yml/badge.svg)](https://github.com/Burton-David/ResearchAssistantMCP/actions/workflows/ci.yml)
+[![Python 3.11–3.12](https://img.shields.io/badge/python-3.11%20%7C%203.12-blue)](https://www.python.org/)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
+
 A citation-finding research assistant for scientists, exposed as an MCP server. Paste a draft paragraph; it identifies the claims that need citations, finds candidate papers across arXiv, Semantic Scholar, PubMed, and OpenAlex, scores their quality, and explains each recommendation — all from inside Claude Desktop, Claude Code, or any MCP-compatible client.
 
 ## The killer demo
