@@ -1015,8 +1015,8 @@ def build_server(
     async def _do_find_referenced_by(arguments: dict[str, Any]) -> dict[str, Any]:
         if openalex is None:
             raise ValueError(
-                "find_referenced_by unavailable: OpenAlex isn't configured. "
-                "Set RESEARCH_MCP_OPENALEX_EMAIL to enable it. The "
+                "find_referenced_by unavailable: this server was started "
+                "without an OpenAlex source. The "
                 "referenced_works signal is OpenAlex-only — other sources "
                 "(arXiv, Semantic Scholar, PubMed) don't expose outgoing-"
                 "citation graphs through their public APIs."
@@ -1042,9 +1042,9 @@ def build_server(
     async def _do_find_related(arguments: dict[str, Any]) -> dict[str, Any]:
         if openalex is None:
             raise ValueError(
-                "find_related unavailable: OpenAlex isn't configured. "
-                "Set RESEARCH_MCP_OPENALEX_EMAIL to enable it. The "
-                "related_works signal is OpenAlex-only."
+                "find_related unavailable: this server was started "
+                "without an OpenAlex source. The related_works signal "
+                "is OpenAlex-only."
             )
         args = FindRelatedInput.model_validate(arguments)
         try:
@@ -1276,6 +1276,20 @@ def _select_pdf_fetcher() -> HttpPdfFetcher | None:
     return HttpPdfFetcher()
 
 
+def _select_openalex() -> tuple[OpenAlexSource, bool]:
+    """Build the OpenAlex source and decide whether search fans out to it.
+
+    The citation-graph tools always get the source: single-work lookups
+    cost zero OpenAlex credits, so they work fine keyless. Search pages
+    cost credits, so OpenAlex joins the search fan-out only when the user
+    set a key, or an email from before OpenAlex dropped the polite pool.
+    """
+    api_key = os.environ.get("RESEARCH_MCP_OPENALEX_API_KEY", "").strip()
+    email = os.environ.get("RESEARCH_MCP_OPENALEX_EMAIL", "").strip()
+    source = OpenAlexSource(api_key=api_key or None, email=email or None)
+    return source, bool(api_key or email)
+
+
 async def run_default() -> None:
     """Production wiring: real arXiv + S2; embedder selected from env.
 
@@ -1292,13 +1306,8 @@ async def run_default() -> None:
     if os.environ.get("RESEARCH_MCP_DISABLE_PUBMED") != "1":
         pubmed = PubMedSource()
         sources_list.append(pubmed)
-    # OpenAlex is opt-in: their polite-pool guidance requires a `mailto`,
-    # and rather than ship a placeholder we treat the email as the
-    # opt-in signal. Set RESEARCH_MCP_OPENALEX_EMAIL to enable.
-    openalex: OpenAlexSource | None = None
-    openalex_email = os.environ.get("RESEARCH_MCP_OPENALEX_EMAIL")
-    if openalex_email:
-        openalex = OpenAlexSource(email=openalex_email)
+    openalex, openalex_in_search = _select_openalex()
+    if openalex_in_search:
         sources_list.append(openalex)
     sources: tuple[Source, ...] = tuple(sources_list)
     reranker, reranker_label = _select_reranker()
@@ -1385,8 +1394,7 @@ async def run_default() -> None:
         await s2.aclose()
         if pubmed is not None:
             await pubmed.aclose()
-        if openalex is not None:
-            await openalex.aclose()
+        await openalex.aclose()
         if pdf_fetcher is not None:
             await pdf_fetcher.aclose()
         if index_to_close is not None:

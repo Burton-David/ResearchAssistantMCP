@@ -278,9 +278,7 @@ def build_specs(handlers: ToolHandlers) -> list[ToolSpec]:
                 "source paper id must be OpenAlex- or DOI-prefixed "
                 "(e.g. 'openalex:W2741809807', 'doi:10.1038/nature12373') "
                 "because referenced_works is an OpenAlex-only signal — "
-                "arXiv- and S2-only ids aren't supported. Requires "
-                "RESEARCH_MCP_OPENALEX_EMAIL to be set; the tool refuses "
-                "with a hint otherwise."
+                "arXiv- and S2-only ids aren't supported."
             ),
             input_model=FindReferencedByInput,
             handler=handlers.find_referenced_by,
@@ -294,7 +292,7 @@ def build_specs(handlers: ToolHandlers) -> list[ToolSpec]:
                 "computed by OpenAlex from topic-vector similarity, so "
                 "treat results as 'papers OpenAlex thinks are adjacent' "
                 "rather than 'papers this one cites'. Same prefix rules "
-                "and email requirement as find_referenced_by."
+                "as find_referenced_by."
             ),
             input_model=FindRelatedInput,
             handler=handlers.find_related,
