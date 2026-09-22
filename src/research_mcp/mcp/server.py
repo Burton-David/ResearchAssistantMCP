@@ -1,6 +1,6 @@
 """MCP stdio server.
 
-Wires sources, embedder, index, and the citation registry into the six
+Wires sources, embedder, index, and the citation registry into the
 tool handlers. Default wiring uses real arXiv + Semantic Scholar; the
 embedder is selected by `RESEARCH_MCP_EMBEDDER` (or auto-falls-back to
 OpenAI if `OPENAI_API_KEY` is set). When no embedder is configured, the
@@ -16,15 +16,20 @@ without needing API keys or a writable index path.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import time
 from collections.abc import Awaitable, Callable
+from contextvars import ContextVar
 from typing import Any, Final, Literal
 
 import mcp.types as mcp_types
 from mcp.server import Server
+from mcp.server.context import ServerRequestContext
 from mcp.server.stdio import stdio_server
+from mcp.shared.exceptions import MCPError
+from mcp.types import INVALID_PARAMS
 from pydantic import ValidationError
 
 from research_mcp import __version__
@@ -47,6 +52,13 @@ from research_mcp.embedder import (
 )
 from research_mcp.errors import SourceUnavailable
 from research_mcp.index import FaissIndex, MemoryIndex
+from research_mcp.mcp.registry import (
+    ToolHandler,
+    ToolHandlers,
+    advertise,
+    build_specs,
+    dispatch_table,
+)
 from research_mcp.mcp.tools import (
     AnalyzePaperInput,
     AnalyzePaperOutput,
@@ -102,6 +114,13 @@ from research_mcp.sources import (
 )
 
 _log = logging.getLogger(__name__)
+
+# The request being served, published by `call_tool` for the duration of a
+# handler. v1 exposed this as ambient state on the server; v2 passes it per
+# call, and only two of the fourteen handlers want it.
+_REQUEST_CTX: ContextVar[ServerRequestContext[Any, Any] | None] = ContextVar(
+    "research_mcp_request_ctx", default=None
+)
 
 # Per-tool timeout ceilings. Claude Desktop hard-kills tool calls at
 # ~4 minutes (240s); we surface our own TIMEOUT error well before that
@@ -267,9 +286,9 @@ def _score_to_summary(score: Any) -> CitationQualityScoreSummary:
 
 
 
-def _maybe_progress_callback(
-    server: Server[Any, Any],
-) -> Callable[[int, int, str], Awaitable[None]] | None:
+def _maybe_progress_callback() -> (
+    Callable[[int, int, str], Awaitable[None]] | None
+):
     """Return a progress-notification callback bound to the active request.
 
     MCP clients opt into progress reporting by passing a `progressToken`
@@ -279,10 +298,12 @@ def _maybe_progress_callback(
     MCP clients render these as a live progress indicator on the tool
     call. Best-effort: a closed session or transport error swallows
     silently so a notification failure can't break the tool itself.
+
+    Reads the request `call_tool` published, so it returns None when
+    called outside a tool call.
     """
-    try:
-        ctx = server.request_context
-    except LookupError:
+    ctx = _REQUEST_CTX.get()
+    if ctx is None:
         return None
     meta = getattr(ctx, "meta", None)
     progress_token = getattr(meta, "progressToken", None)
@@ -545,14 +566,13 @@ def build_server(
     analysis_service: AnalysisService | None = None,
     draft_service: DraftService | None = None,
     openalex: OpenAlexSource | None = None,
-) -> Server[Any, Any]:
-    """Construct an MCP `Server` with the six research tools registered.
+) -> Server[Any]:
+    """Construct an MCP `Server` with the research tools registered.
 
     `library` may be None if no embedder is configured. In that mode the
     server still serves search/cite/get_paper/library_status; only
     ingest_paper and library_search refuse.
     """
-    server: Server[Any, Any] = Server("research-mcp", version=__version__)
 
     # ---- MCP prompt: the one canonical entry point researchers want ----
     # We ship a single prompt template rather than a wall of them. The
@@ -562,9 +582,11 @@ def build_server(
     # assist_draft and gives Claude Desktop's prompt menu an obvious
     # entry point a researcher will click before they'd type the tool
     # call by hand.
-    @server.list_prompts()  # type: ignore[no-untyped-call,untyped-decorator]
-    async def list_prompts() -> list[mcp_types.Prompt]:
-        return [
+    async def list_prompts(
+        ctx: ServerRequestContext[Any, Any],
+        params: mcp_types.PaginatedRequestParams | None = None,
+    ) -> mcp_types.ListPromptsResult:
+        return mcp_types.ListPromptsResult(prompts=[
             mcp_types.Prompt(
                 name="review_draft_for_citations",
                 description=(
@@ -584,18 +606,24 @@ def build_server(
                     ),
                 ],
             ),
-        ]
+        ])
 
-    @server.get_prompt()  # type: ignore[no-untyped-call,untyped-decorator]
     async def get_prompt(
-        name: str, arguments: dict[str, str] | None
+        ctx: ServerRequestContext[Any, Any],
+        params: mcp_types.GetPromptRequestParams,
     ) -> mcp_types.GetPromptResult:
+        name = params.name
+        arguments = params.arguments
+        # Raise MCPError rather than ValueError: the runner turns an
+        # unrecognised exception into a bare "Internal server error" and
+        # drops the message, so the client would lose the reason.
         if name != "review_draft_for_citations":
-            raise ValueError(f"unknown prompt: {name}")
+            raise MCPError(code=INVALID_PARAMS, message=f"unknown prompt: {name}")
         draft = (arguments or {}).get("draft", "")
         if not draft.strip():
-            raise ValueError(
-                "review_draft_for_citations requires non-empty `draft`."
+            raise MCPError(
+                code=INVALID_PARAMS,
+                message="review_draft_for_citations requires non-empty `draft`.",
             )
         return mcp_types.GetPromptResult(
             description=(
@@ -622,180 +650,6 @@ def build_server(
                 ),
             ],
         )
-
-    # mcp SDK ships its decorators as untyped at the moment.
-    @server.list_tools()  # type: ignore[no-untyped-call,untyped-decorator]
-    async def list_tools() -> list[mcp_types.Tool]:
-        return [
-            mcp_types.Tool(
-                name="search_papers",
-                description=(
-                    "Search arXiv and Semantic Scholar in parallel and return "
-                    "deduplicated, cross-source-enriched metadata for each "
-                    "paper. Each result carries a `source` field naming which "
-                    "adapter(s) contributed."
-                ),
-                inputSchema=SearchPapersInput.model_json_schema(),
-            ),
-            mcp_types.Tool(
-                name="ingest_paper",
-                description=(
-                    "Add papers to the local FAISS-backed library so they "
-                    "can be recalled by similarity. Two modes: pass "
-                    "`paper_id` to ingest one specific paper, or pass "
-                    "`query` (with optional `max_papers`, `year_min`, "
-                    "`year_max`) to search all configured sources and "
-                    "bulk-ingest the top-N. Query mode streams progress "
-                    "notifications when the client supplies a progressToken — "
-                    "the LLM sees 'embedding 20 papers' / 'indexing' updates "
-                    "as the ingest runs. Requires an embedder; see "
-                    "library_status if unsure whether the server is "
-                    "configured for ingest."
-                ),
-                inputSchema=IngestPaperInput.model_json_schema(),
-            ),
-            mcp_types.Tool(
-                name="library_search",
-                description=(
-                    "Semantic search across the local library; returns the top-k "
-                    "ingested papers with similarity scores. Requires an "
-                    "embedder."
-                ),
-                inputSchema=LibrarySearchInput.model_json_schema(),
-            ),
-            mcp_types.Tool(
-                name="cite_paper",
-                description=(
-                    "Render a citation for a paper id. Fetches metadata from "
-                    "the originating source on demand — does not require the "
-                    "paper to be ingested first. Defaults to AMA; supports "
-                    "APA, MLA, Chicago, and BibTeX."
-                ),
-                inputSchema=CitePaperInput.model_json_schema(),
-            ),
-            mcp_types.Tool(
-                name="library_status",
-                description=(
-                    "Report library state: paper count, configured embedder, "
-                    "any setup hints. Use to verify the server is wired for "
-                    "ingest before attempting one."
-                ),
-                inputSchema=LibraryStatusInput.model_json_schema(),
-            ),
-            mcp_types.Tool(
-                name="get_paper",
-                description=(
-                    "Fetch full Paper metadata for an id without ingesting. "
-                    "Useful as a preview step before deciding whether to "
-                    "commit to embedding the paper into the local library."
-                ),
-                inputSchema=GetPaperInput.model_json_schema(),
-            ),
-            mcp_types.Tool(
-                name="find_paper",
-                description=(
-                    "Find a paper by title (and optional author names) when "
-                    "you don't have a canonical id. Returns at most three "
-                    "candidates ranked by title-token similarity with a "
-                    "confidence score. Use this to bridge from a citation "
-                    "you've read about to an id you can ingest or cite."
-                ),
-                inputSchema=FindPaperInput.model_json_schema(),
-            ),
-            mcp_types.Tool(
-                name="extract_claims",
-                description=(
-                    "Scan draft text and identify claims that need citations: "
-                    "statistical (percentages, p-values, sample sizes), "
-                    "methodological (techniques, algorithms), comparative "
-                    "(outperforms / better than), causal, and theoretical. "
-                    "Each claim carries its type, a confidence score, the "
-                    "surrounding context, and suggested search terms — feed "
-                    "those into search_papers / find_citations to find the "
-                    "papers worth citing."
-                ),
-                inputSchema=ExtractClaimsInput.model_json_schema(),
-            ),
-            mcp_types.Tool(
-                name="find_citations",
-                description=(
-                    "Given a Claim (typically from extract_claims), search "
-                    "all configured sources, score each candidate by venue + "
-                    "impact + recency, and return the top-k recommended "
-                    "citations. Each candidate carries its full quality "
-                    "breakdown, not just a total — so the user can see WHY "
-                    "a paper ranked where it did."
-                ),
-                inputSchema=FindCitationsInput.model_json_schema(),
-            ),
-            mcp_types.Tool(
-                name="explain_citation",
-                description=(
-                    "Produce a human-readable recommendation for citing a "
-                    "specific paper as evidence for a specific claim. "
-                    "Returns a strong/moderate/weak verdict plus the "
-                    "venue + impact + recency reasoning the user can show "
-                    "to a co-author or reviewer."
-                ),
-                inputSchema=ExplainCitationInput.model_json_schema(),
-            ),
-            mcp_types.Tool(
-                name="analyze_paper",
-                description=(
-                    "Use an LLM to extract structured analysis of a paper: "
-                    "summary, key contributions, methodology, technical "
-                    "approach, limitations, future directions, datasets, "
-                    "metrics, and baselines. Pass `kinds` to limit which "
-                    "fields are extracted (saves output tokens). Backed "
-                    "by OpenAI gpt-4o-mini or Anthropic claude-haiku, "
-                    "selected via RESEARCH_MCP_ANALYSIS_MODEL."
-                ),
-                inputSchema=AnalyzePaperInput.model_json_schema(),
-            ),
-            mcp_types.Tool(
-                name="assist_draft",
-                description=(
-                    "End-to-end citation assistant: paste a draft paragraph, "
-                    "get a list of recommended citations per claim. The "
-                    "pipeline extracts typed claims, finds candidate papers "
-                    "across all configured sources (arXiv, Semantic Scholar, "
-                    "PubMed, OpenAlex), scores each by venue + impact + "
-                    "recency, and returns ranked recommendations with "
-                    "human-readable explanations. Streams progress "
-                    "notifications when the client supplies a "
-                    "progressToken — the LLM sees 'claim 3/8 done' "
-                    "messages as the pipeline runs."
-                ),
-                inputSchema=AssistDraftInput.model_json_schema(),
-            ),
-            mcp_types.Tool(
-                name="find_referenced_by",
-                description=(
-                    "Walk OpenAlex's outgoing citation graph: return up to "
-                    "`max_results` papers that the given paper cites. The "
-                    "source paper id must be OpenAlex- or DOI-prefixed "
-                    "(e.g. 'openalex:W2741809807', 'doi:10.1038/nature12373') "
-                    "because referenced_works is an OpenAlex-only signal — "
-                    "arXiv- and S2-only ids aren't supported. Requires "
-                    "RESEARCH_MCP_OPENALEX_EMAIL to be set; the tool refuses "
-                    "with a hint otherwise."
-                ),
-                inputSchema=FindReferencedByInput.model_json_schema(),
-            ),
-            mcp_types.Tool(
-                name="find_related",
-                description=(
-                    "Return OpenAlex's similarity-neighborhood for the given "
-                    "paper. Unlike `find_referenced_by`, this isn't a "
-                    "deterministic citation graph — `related_works` is "
-                    "computed by OpenAlex from topic-vector similarity, so "
-                    "treat results as 'papers OpenAlex thinks are adjacent' "
-                    "rather than 'papers this one cites'. Same prefix rules "
-                    "and email requirement as find_referenced_by."
-                ),
-                inputSchema=FindRelatedInput.model_json_schema(),
-            ),
-        ]
 
     async def _do_search(arguments: dict[str, Any]) -> dict[str, Any]:
         args = SearchPapersInput.model_validate(arguments)
@@ -841,7 +695,7 @@ def build_server(
             # upsert). Stream progress when the client passed a progressToken
             # so it isn't a silent 30-60s block. Single-id mode above is
             # sub-second and doesn't bother.
-            progress_cb = _maybe_progress_callback(server)
+            progress_cb = _maybe_progress_callback()
             if progress_cb is not None:
                 await progress_cb(0, 1, f"searching for {args.query!r}...")
             outcome = await search.search(
@@ -1028,7 +882,7 @@ def build_server(
                 "en_core_web_sm); a citation_service is wired by default."
             )
         args = AssistDraftInput.model_validate(arguments)
-        progress_cb = _maybe_progress_callback(server)
+        progress_cb = _maybe_progress_callback()
         recommendations = await draft_service.assist(
             args.text,
             k_per_claim=args.k_per_claim,
@@ -1210,82 +1064,138 @@ def build_server(
             ],
         ).model_dump()
 
-    handlers: dict[str, Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]] = {
-        "search_papers": _do_search,
-        "ingest_paper": _do_ingest,
-        "library_search": _do_recall,
-        "cite_paper": _do_cite,
-        "library_status": _do_status,
-        "get_paper": _do_get_paper,
-        "find_paper": _do_find_paper,
-        "extract_claims": _do_extract_claims,
-        "find_citations": _do_find_citations,
-        "explain_citation": _do_explain_citation,
-        "analyze_paper": _do_analyze_paper,
-        "assist_draft": _do_assist_draft,
-        "find_referenced_by": _do_find_referenced_by,
-        "find_related": _do_find_related,
-    }
+    specs = build_specs(
+        ToolHandlers(
+            search_papers=_do_search,
+            ingest_paper=_do_ingest,
+            library_search=_do_recall,
+            cite_paper=_do_cite,
+            library_status=_do_status,
+            get_paper=_do_get_paper,
+            find_paper=_do_find_paper,
+            extract_claims=_do_extract_claims,
+            find_citations=_do_find_citations,
+            explain_citation=_do_explain_citation,
+            analyze_paper=_do_analyze_paper,
+            assist_draft=_do_assist_draft,
+            find_referenced_by=_do_find_referenced_by,
+            find_related=_do_find_related,
+        )
+    )
 
-    # validate_input=False bypasses the mcp SDK's strict jsonschema check so
-    # pydantic — which is doing the same job inside each handler — gets first
-    # crack at the arguments. The motivation is concrete: model clients
+    # mcp SDK ships its decorators as untyped at the moment.
+    async def list_tools(
+        ctx: ServerRequestContext[Any, Any],
+        params: mcp_types.PaginatedRequestParams | None = None,
+    ) -> mcp_types.ListToolsResult:
+        return mcp_types.ListToolsResult(tools=advertise(specs))
+
+    handlers = dispatch_table(specs)
+
+    # v2 hands the handler the raw params without checking them against the
+    # advertised schema, which is what this server wants: model clients
     # frequently serialize numeric tool args as JSON strings ("2018" instead
     # of 2018). jsonschema rejects those as type-mismatched; pydantic's
     # default lax mode coerces them. extra="forbid" on each Input model still
     # bounces hallucinated unknown keys, so we don't lose schema strictness.
-    @server.call_tool(validate_input=False)  # type: ignore[untyped-decorator]  # mcp SDK decorators are untyped
-    async def call_tool(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
-        handler = handlers.get(name)
-        if handler is None:
-            raise ValueError(f"unknown tool: {name}")
+    async def call_tool(
+        ctx: ServerRequestContext[Any, Any],
+        params: mcp_types.CallToolRequestParams,
+    ) -> mcp_types.CallToolResult:
+        name = params.name
+        arguments = dict(params.arguments or {})
+        # v1 read the active request off the server as ambient state, which
+        # is how the progress helper found the client's progressToken. v2
+        # passes it per call, so publish it for the duration of the handler
+        # rather than thread an unused argument through all fourteen.
+        token = _REQUEST_CTX.set(ctx)
+        try:
+            return await _run_tool(name, arguments, handlers)
+        finally:
+            _REQUEST_CTX.reset(token)
+
+    return Server(
+        "research-mcp",
+        version=__version__,
+        on_list_prompts=list_prompts,
+        on_get_prompt=get_prompt,
+        on_list_tools=list_tools,
+        on_call_tool=call_tool,
+    )
+
+
+async def _run_tool(
+    name: str,
+    arguments: dict[str, Any],
+    handlers: dict[str, ToolHandler],
+) -> mcp_types.CallToolResult:
+    """Run one tool call: budget it, log it, and shape the result.
+
+    v1 turned an exception raised here into an `isError` result on the
+    client's behalf. v2 lets it become a JSON-RPC error instead, which
+    would surface to the model as a protocol failure rather than something
+    it can read and retry, so the error text is packed into an `isError`
+    result explicitly.
+    """
+    handler = handlers.get(name)
+    if handler is None:
+        return _tool_error(f"unknown tool: {name}")
         # Log every call: name, arg keys (not values — args may be large
         # queries or paper bodies), elapsed ms, result-shape hint. The next
         # agent debugging an issue should be able to grep the Claude Desktop
         # log for tool=cite_paper and reconstruct the call sequence.
-        arg_keys = ",".join(sorted(arguments.keys())) or "-"
-        start = time.monotonic()
-        budget = _TOOL_TIMEOUTS.get(name, _DEFAULT_TOOL_TIMEOUT)
-        try:
-            result = await asyncio.wait_for(handler(arguments), timeout=budget)
-        except TimeoutError as exc:
-            elapsed_ms = (time.monotonic() - start) * 1000
-            _log.warning(
-                "tool=%s args=%s elapsed=%.0fms timeout_after=%.0fs",
-                name, arg_keys, elapsed_ms, budget,
-            )
-            raise ValueError(
-                f"{name} timed out after {budget:.0f}s. This is usually "
-                "an upstream rate limit or LLM API slowdown — try again "
-                "in a moment, or simplify the query."
-            ) from exc
-        except ValidationError as exc:
-            # Pydantic's default __str__ embeds a docs URL
-            # (https://errors.pydantic.dev/...) in the message. That leaks
-            # framework noise to the LLM client — same class of leakage we
-            # cleaned out of the SourceUnavailable path. Reformat to a
-            # clean "field: message" line and drop the URL.
-            elapsed_ms = (time.monotonic() - start) * 1000
-            _log.warning(
-                "tool=%s args=%s elapsed=%.0fms validation_error",
-                name, arg_keys, elapsed_ms,
-            )
-            raise ValueError(_format_validation_error(name, exc)) from exc
-        except Exception as exc:
-            elapsed_ms = (time.monotonic() - start) * 1000
-            _log.warning(
-                "tool=%s args=%s elapsed=%.0fms error=%s: %s",
-                name, arg_keys, elapsed_ms, type(exc).__name__, exc,
-            )
-            raise
+    arg_keys = ",".join(sorted(arguments.keys())) or "-"
+    start = time.monotonic()
+    budget = _TOOL_TIMEOUTS.get(name, _DEFAULT_TOOL_TIMEOUT)
+    try:
+        result = await asyncio.wait_for(handler(arguments), timeout=budget)
+    except TimeoutError:
         elapsed_ms = (time.monotonic() - start) * 1000
-        _log.info(
-            "tool=%s args=%s elapsed=%.0fms results=%s",
-            name, arg_keys, elapsed_ms, _result_hint(name, result),
+        _log.warning(
+            "tool=%s args=%s elapsed=%.0fms timeout_after=%.0fs",
+            name, arg_keys, elapsed_ms, budget,
         )
-        return result
+        return _tool_error(
+            f"{name} timed out after {budget:.0f}s. This is usually "
+            "an upstream rate limit or LLM API slowdown — try again "
+            "in a moment, or simplify the query."
+        )
+    except ValidationError as exc:
+        # Pydantic's default __str__ embeds a docs URL
+        # (https://errors.pydantic.dev/...) in the message. That leaks
+        # framework noise to the LLM client — same class of leakage we
+        # cleaned out of the SourceUnavailable path. Reformat to a
+        # clean "field: message" line and drop the URL.
+        elapsed_ms = (time.monotonic() - start) * 1000
+        _log.warning(
+            "tool=%s args=%s elapsed=%.0fms validation_error",
+            name, arg_keys, elapsed_ms,
+        )
+        return _tool_error(_format_validation_error(name, exc))
+    except Exception as exc:
+        elapsed_ms = (time.monotonic() - start) * 1000
+        _log.warning(
+            "tool=%s args=%s elapsed=%.0fms error=%s: %s",
+            name, arg_keys, elapsed_ms, type(exc).__name__, exc,
+        )
+        return _tool_error(str(exc))
+    elapsed_ms = (time.monotonic() - start) * 1000
+    _log.info(
+        "tool=%s args=%s elapsed=%.0fms results=%s",
+        name, arg_keys, elapsed_ms, _result_hint(name, result),
+    )
+    return mcp_types.CallToolResult(
+        content=[mcp_types.TextContent(type="text", text=json.dumps(result))],
+        structured_content=result,
+    )
 
-    return server
+
+def _tool_error(message: str) -> mcp_types.CallToolResult:
+    """An `isError` result carrying text the model can read and act on."""
+    return mcp_types.CallToolResult(
+        content=[mcp_types.TextContent(type="text", text=message)],
+        is_error=True,
+    )
 
 
 def _format_validation_error(tool_name: str, exc: ValidationError) -> str:
