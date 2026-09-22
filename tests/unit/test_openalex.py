@@ -41,12 +41,25 @@ def test_openalex_satisfies_source_protocol() -> None:
     assert "arxiv" in src.id_prefixes
 
 
-def test_openalex_requires_email_at_construction() -> None:
-    """Per the OpenAlex polite-pool guidance, every request must carry mailto.
-    A blank email would silently degrade to the 'common pool' (slower, less
-    reliable) — better to refuse construction so the user fixes it now."""
-    with pytest.raises(ValueError, match="email"):
-        OpenAlexSource(email="", cache_dir=Path("/tmp/_unused"))
+async def test_keyless_source_sends_no_auth_header_and_no_mailto(
+    tmp_path: Path,
+) -> None:
+    """OpenAlex dropped the mailto polite pool in Feb 2026, so a source with
+    neither key nor email is a valid config, not a misconfig."""
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return _work_response(_VASWANI_WORK)
+
+    src = _build_source(tmp_path, handler, email=None)
+    try:
+        paper = await src.fetch("openalex:W2626778328")
+    finally:
+        await src.aclose()
+    assert paper is not None
+    assert "authorization" not in seen[0].headers
+    assert "mailto" not in seen[0].url.params
 
 
 # ---- url-stripping helpers ----
@@ -291,11 +304,13 @@ def _build_source(
     tmp_path: Path,
     handler: Callable[[httpx.Request], httpx.Response],
     *,
-    email: str = "test@example.com",
+    email: str | None = "test@example.com",
+    api_key: str | None = None,
 ) -> OpenAlexSource:
     transport = httpx.MockTransport(handler)
     client = httpx.AsyncClient(transport=transport)
     return OpenAlexSource(
+        api_key=api_key,
         email=email,
         cache_dir=tmp_path / "cache",
         client=client,
@@ -519,6 +534,102 @@ async def test_mailto_param_attached_to_every_request(tmp_path: Path) -> None:
         await src.aclose()
     for params in seen:
         assert params["mailto"] == "user@lab.edu"
+
+
+_FAKE_KEY = "oa-test-key-8f3a"
+
+
+async def test_api_key_travels_as_bearer_header_not_query_param(
+    tmp_path: Path,
+) -> None:
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        if "/works/" in request.url.path:
+            return _work_response(_VASWANI_WORK)
+        return _search_response(_VASWANI_WORK)
+
+    src = _build_source(tmp_path, handler, api_key=_FAKE_KEY)
+    try:
+        await src.search(SearchQuery(text="x", max_results=5))
+        await src.fetch("openalex:W2626778328")
+    finally:
+        await src.aclose()
+    assert len(seen) == 2
+    for request in seen:
+        assert request.headers["authorization"] == f"Bearer {_FAKE_KEY}"
+        assert _FAKE_KEY not in str(request.url)
+
+
+async def test_blank_api_key_sends_no_auth_header(tmp_path: Path) -> None:
+    """An env var set to whitespace shouldn't produce `Bearer ` with no token,
+    which OpenAlex would reject as an invalid key."""
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return _work_response(_VASWANI_WORK)
+
+    src = _build_source(tmp_path, handler, api_key="   ")
+    try:
+        await src.fetch("openalex:W2626778328")
+    finally:
+        await src.aclose()
+    assert "authorization" not in seen[0].headers
+
+
+async def test_api_key_stays_out_of_cache_and_shares_keyless_entries(
+    tmp_path: Path,
+) -> None:
+    """The key isn't part of the cache key, so a keyed and a keyless source
+    pointed at one cache dir hit the same entry, and no file on disk holds
+    the key."""
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return _search_response(_VASWANI_WORK)
+
+    keyed = _build_source(tmp_path, handler, email=None, api_key=_FAKE_KEY)
+    keyless = _build_source(tmp_path, handler, email=None)
+    try:
+        await keyed.search(SearchQuery(text="shared", max_results=5))
+        await keyless.search(SearchQuery(text="shared", max_results=5))
+    finally:
+        await keyed.aclose()
+        await keyless.aclose()
+    assert calls == 1
+    cache_files = list((tmp_path / "cache").iterdir())
+    assert cache_files
+    for path in cache_files:
+        assert _FAKE_KEY not in path.name
+        assert _FAKE_KEY.encode() not in path.read_bytes()
+
+
+async def test_api_key_stays_out_of_errors_and_logs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    monkeypatch.setattr(
+        "research_mcp.sources._backoff.asyncio.sleep",
+        _no_sleep,
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(503, content=b"upstream busy")
+
+    src = _build_source(tmp_path, handler, api_key=_FAKE_KEY)
+    caplog.set_level("DEBUG")
+    try:
+        with pytest.raises(SourceUnavailable) as exc_info:
+            await src.search(SearchQuery(text="x", max_results=5))
+    finally:
+        await src.aclose()
+    assert _FAKE_KEY not in str(exc_info.value)
+    assert _FAKE_KEY not in caplog.text
 
 
 # ---- input round-trip ----

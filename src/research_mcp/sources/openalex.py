@@ -2,14 +2,14 @@
 
 Endpoint: https://api.openalex.org/works
 
-OpenAlex is free and unauthenticated; politeness is via a `mailto`
-query parameter that puts requests in the polite pool (faster, more
-reliable than the common pool). We make `email` a required constructor
-argument — running without one would silently drop us into the slow
-pool, so it's better to refuse construction and surface the misconfig
-at boot. The wiring layer reads `RESEARCH_MCP_OPENALEX_EMAIL`; if it's
-unset, OpenAlex isn't added to the Source list (no error, just one
-fewer source).
+OpenAlex retired its mailto polite pool in February 2026 and now meters
+every caller against a daily credit budget. A keyless caller gets a small
+free budget; an API key raises it. The key travels only as a Bearer
+`Authorization` header, never as a query parameter, so it stays out of
+request URLs, the disk-cache key, and the httpx error strings we log and
+surface. `email` is still accepted and sent as `mailto` so older configs
+keep working, but OpenAlex ignores it now. The wiring layer reads
+`RESEARCH_MCP_OPENALEX_API_KEY` and `RESEARCH_MCP_OPENALEX_EMAIL`.
 
 Three `id_prefixes`: `openalex:` (the canonical form, e.g.
 `openalex:W2626778328`), `doi:` (OpenAlex's `/works/doi:<doi>` endpoint
@@ -50,7 +50,7 @@ _log = logging.getLogger(__name__)
 _API_BASE: Final = "https://api.openalex.org"
 _DEFAULT_CACHE_TTL_SECONDS: Final = 24 * 60 * 60
 _DEFAULT_TIMEOUT: Final = 30.0
-# OpenAlex's polite pool tolerates ~10 req/sec without complaint.
+# OpenAlex allows up to 100 req/sec; 10 is plenty and leaves headroom.
 _DEFAULT_MIN_INTERVAL: Final = 0.1
 # /works rejects per-page > 200; cap on our side so a SearchQuery with
 # max_results=500 doesn't get a 400 back.
@@ -91,19 +91,16 @@ class OpenAlexSource:
     def __init__(
         self,
         *,
-        email: str,
+        api_key: str | None = None,
+        email: str | None = None,
         cache_dir: str | os.PathLike[str] | None = None,
         ttl_seconds: int = _DEFAULT_CACHE_TTL_SECONDS,
         min_interval_seconds: float = _DEFAULT_MIN_INTERVAL,
         client: httpx.AsyncClient | None = None,
     ) -> None:
-        if not email or not email.strip():
-            raise ValueError(
-                "OpenAlexSource requires a non-empty email — OpenAlex's polite pool "
-                "uses ?mailto= for identification, and an empty value silently degrades "
-                "to the slow common pool. Set RESEARCH_MCP_OPENALEX_EMAIL."
-            )
-        self._email = email.strip()
+        key = (api_key or "").strip()
+        self._headers = {"Authorization": f"Bearer {key}"} if key else {}
+        self._email = (email or "").strip() or None
         cache_path = (
             Path(cache_dir)
             if cache_dir is not None
@@ -281,10 +278,12 @@ class OpenAlexSource:
         *,
         allow_404: bool,
     ) -> bytes | None:
-        # Polite-pool param appears on every request.
-        merged_params = {"mailto": self._email}
+        merged_params = {"mailto": self._email} if self._email else {}
         if params:
             merged_params.update(params)
+        # The cache key leaves the API key out on purpose: the response body
+        # doesn't depend on who asked, and a keyed cache would put the
+        # secret into a hash input for no benefit.
         cache_key = path + "?" + "&".join(
             f"{k}={v}" for k, v in sorted(merged_params.items())
         )
@@ -294,7 +293,9 @@ class OpenAlexSource:
         await self._rate.acquire()
 
         async def do_request() -> httpx.Response:
-            return await self._client.get(_API_BASE + path, params=merged_params)
+            return await self._client.get(
+                _API_BASE + path, params=merged_params, headers=self._headers
+            )
 
         try:
             response = await with_backoff(do_request, source_name=self.name)

@@ -4,9 +4,9 @@
 [![Python 3.11–3.12](https://img.shields.io/badge/python-3.11%20%7C%203.12-blue)](https://www.python.org/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
-A citation-finding research assistant for scientists, exposed as an MCP server. Paste a draft paragraph; it identifies the claims that need citations, finds candidate papers across arXiv, Semantic Scholar, PubMed, and OpenAlex, scores their quality, and explains each recommendation — all from inside Claude Desktop, Claude Code, or any MCP-compatible client.
+A citation-finding research assistant for scientists, exposed as an MCP server. Paste a draft paragraph; it identifies the claims that need citations, finds candidate papers across arXiv, Semantic Scholar, PubMed, and OpenAlex, scores their quality, and explains each recommendation, all from inside Claude Desktop, Claude Code, or any MCP-compatible client.
 
-## The killer demo
+## Example
 
 ```
 assist_draft text="""
@@ -15,7 +15,7 @@ outperformed the LSTM baseline. Accuracy improved by 12% over prior work.
 """
 ```
 
-→ extracts three claims (one methodological, one comparative, one statistical), runs each through search across all configured sources, scores candidates on four dimensions — venue (peer-review tier, 30 pts), impact (citation count + velocity, 35 pts), author (max h-index across authors, 25 pts), recency (log-decay; foundational papers exempt, 10 pts) — and returns ranked recommendations with the reasoning a researcher could show to a co-author. One MCP call, full pipeline.
+→ extracts three claims (one methodological, one comparative, one statistical), runs each through search across all configured sources, scores candidates on four dimensions (venue: peer-review tier, 30 pts; impact: citation count + velocity, 35 pts; author: max h-index across authors, 25 pts; recency: log-decay with foundational papers exempt, 10 pts), and returns ranked recommendations with the reasoning a researcher could show to a co-author. One MCP call, full pipeline.
 
 ## Why
 
@@ -26,28 +26,28 @@ LLMs are good at synthesis and bad at sourcing. Off-the-shelf web search returns
 Fourteen MCP tools the LLM calls directly, organized by stage of the research workflow.
 
 **Citation assistance**
-- **`assist_draft`** — the killer demo: draft → claims → ranked, explained citation recommendations. Streams progress notifications when the client supplies a `progressToken`, so the LLM sees "claim 3/8 done" updates as the pipeline runs.
-- **`extract_claims`** — scan draft text and tag claims (statistical, methodological, comparative, causal, theoretical) with confidence + suggested search terms.
-- **`find_citations`** — given a claim, return top-k candidate papers with quality scores and warnings.
-- **`explain_citation`** — strong/moderate/weak verdict for citing a specific paper as evidence for a specific claim. Returns the full quality-score breakdown alongside the explanation.
+- **`assist_draft`**: the full pipeline in one call, draft → claims → ranked, explained citation recommendations. Streams progress notifications when the client supplies a `progressToken`, so the LLM sees "claim 3/8 done" updates as the pipeline runs.
+- **`extract_claims`**: scan draft text and tag claims (statistical, methodological, comparative, causal, theoretical) with confidence + suggested search terms.
+- **`find_citations`**: given a claim, return top-k candidate papers with quality scores and warnings.
+- **`explain_citation`**: strong/moderate/weak verdict for citing a specific paper as evidence for a specific claim. Returns the full quality-score breakdown alongside the explanation.
 
 **Paper analysis**
-- **`analyze_paper`** — LLM-driven structured extraction (summary, contributions, methodology, datasets, metrics, baselines). Backed by OpenAI gpt-4o-mini or Anthropic claude-haiku, selected via env.
+- **`analyze_paper`**: LLM-driven structured extraction (summary, contributions, methodology, datasets, metrics, baselines). Backed by OpenAI gpt-4o-mini or Anthropic claude-haiku, selected via env.
 
 **Search and corpus**
-- **`search_papers`** — arXiv + Semantic Scholar + PubMed + OpenAlex in parallel, with cross-source enrichment and provenance tracking. Returns a `source_contributions` dict naming how many results each source contributed.
-- **`find_paper`** — title-and-author lookup with Jaccard re-ranking. **This is the right tool for canonical-paper lookups** (e.g., "find Vaswani et al.'s Attention paper") — `search_papers` is for general queries where the canonical paper might not survive the API's relevance ranking.
-- **`ingest_paper`** — add to the local FAISS-backed library, by canonical id (single paper) or by `query` + `max_papers` (bulk-ingest top-N from search).
-- **`library_search`** — semantic recall over your local library, top-k with similarity scores.
-- **`cite_paper`** — render any paper as AMA, APA, MLA, Chicago, or BibTeX. Fetches metadata on demand; ingest not required.
-- **`get_paper`** — preview full Paper metadata for an id, with cross-source enrichment for venue / DOI / citation count.
-- **`library_status`** — paper count plus the configured embedder / reranker / source list / claim extractor / paper analyzer / citation scorer. Single call confirms the entire wiring.
+- **`search_papers`**: arXiv + Semantic Scholar + PubMed (+ OpenAlex when configured) in parallel, with cross-source enrichment and provenance tracking. Returns a `source_contributions` dict naming how many results each source contributed.
+- **`find_paper`**: title-and-author lookup with Jaccard re-ranking. **This is the right tool for canonical-paper lookups** (e.g., "find Vaswani et al.'s Attention paper"); `search_papers` is for general queries where the canonical paper might not survive the API's relevance ranking.
+- **`ingest_paper`**: add to the local FAISS-backed library, by canonical id (single paper) or by `query` + `max_papers` (bulk-ingest top-N from search).
+- **`library_search`**: semantic recall over your local library, top-k with similarity scores.
+- **`cite_paper`**: render any paper as AMA, APA, MLA, Chicago, or BibTeX. Fetches metadata on demand; ingest not required.
+- **`get_paper`**: preview full Paper metadata for an id, with cross-source enrichment for venue / DOI / citation count.
+- **`library_status`**: paper count plus the configured embedder / reranker / source list / claim extractor / paper analyzer / citation scorer. Single call confirms the entire wiring.
 
 **Citation graph traversal**
-- **`find_referenced_by`** — given a paper, return up to N papers it cites. Walks OpenAlex's `referenced_works` deterministically (this is the citation graph, not similarity).
-- **`find_related`** — given a paper, return up to N papers OpenAlex considers similar by topic-vector overlap. Useful for exploration; not a citation relationship.
+- **`find_referenced_by`**: given a paper, return up to N papers it cites. Walks OpenAlex's `referenced_works` deterministically (this is the citation graph, not similarity). Needs no OpenAlex key or email.
+- **`find_related`**: given a paper, return up to N papers OpenAlex considers similar by topic-vector overlap. Useful for exploration; not a citation relationship. Needs no OpenAlex key or email.
 
-**Plus one MCP prompt template:** `review_draft_for_citations` — bundles the right framing for `assist_draft` so a researcher who opens Claude Desktop's prompt menu sees an obvious entry point.
+**Plus one MCP prompt template:** `review_draft_for_citations` bundles the right framing for `assist_draft` so a researcher who opens Claude Desktop's prompt menu sees an obvious entry point.
 
 ## Quick start
 
@@ -89,8 +89,17 @@ pip install -e ".[pdf]"
 export SEMANTIC_SCHOLAR_API_KEY=...           # raises S2 rate limit
 export RESEARCH_MCP_S2_SHARED_RATELIMIT=1      # share S2's rate limit across processes (POSIX)
 export NCBI_API_KEY=...                        # raises PubMed rate limit (3 → 10/sec)
-export RESEARCH_MCP_OPENALEX_EMAIL=you@lab.edu # opt in to OpenAlex
 export RESEARCH_MCP_DISABLE_PUBMED=1           # opt OUT of PubMed (default: on)
+
+# Optional: add OpenAlex to the sources that search_papers, find_citations,
+# assist_draft, and the other search-backed tools fan out to.
+# OpenAlex meters every caller against a daily credit budget. Each search page
+# costs credits; single-work lookups (find_referenced_by, find_related) are
+# free, so those two tools use OpenAlex even with neither setting below.
+# A free key from https://openalex.org/settings/api raises the daily budget.
+export RESEARCH_MCP_OPENALEX_API_KEY=...       # sent only as an Authorization: Bearer header
+# RESEARCH_MCP_OPENALEX_EMAIL=you@lab.edu      # older setting; still adds OpenAlex to
+#                                              # search, but OpenAlex ignores the email
 
 # Optional: enable a cross-encoder reranker for better non-CS-domain
 # search quality. Adds 200-1000ms per search/recall; off by default.
@@ -129,7 +138,7 @@ Add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
 }
 ```
 
-Use the absolute path to the `research-mcp` binary — Claude Desktop won't have your venv on `$PATH`. The server auto-loads `.env` from the project root, so you don't need an `env` block in this file as long as `OPENAI_API_KEY` and `RESEARCH_MCP_INDEX_PATH` live there. Prefer that over inlining secrets into the desktop config.
+Use the absolute path to the `research-mcp` binary; Claude Desktop won't have your venv on `$PATH`. The server auto-loads `.env` from the project root, so you don't need an `env` block in this file as long as `OPENAI_API_KEY` and `RESEARCH_MCP_INDEX_PATH` live there. Prefer that over inlining secrets into the desktop config.
 
 Restart Claude Desktop (⌘Q, not just close the window). The fourteen tools appear in the model's tool list.
 
@@ -149,9 +158,9 @@ CitationScorer    paper → quality breakdown      (field-aware, heuristic, llm,
 PaperAnalyzer     paper → structured analysis    (openai, anthropic, fake)
 ```
 
-Six services compose them: `SearchService`, `LibraryService`, `DiscoveryService`, `CitationService`, `AnalysisService`, `DraftService`. The MCP server wires services into tools but knows nothing about specific implementations — swapping FAISS for Chroma, OpenAI for a local LLM, or spaCy for a transformer-based extractor is a one-line change in the wiring module.
+Six services compose them: `SearchService`, `LibraryService`, `DiscoveryService`, `CitationService`, `AnalysisService`, `DraftService`. The MCP server wires services into tools but knows nothing about specific implementations. Swapping FAISS for Chroma, OpenAI for a local LLM, or spaCy for a transformer-based extractor is a one-line change in the wiring module.
 
-For an example of orchestrating these services from pure Python (no MCP server in the middle), see [`examples/orchestrator_demo.py`](examples/orchestrator_demo.py). The same composition pattern wraps cleanly under the Claude Agent SDK — comments inside the file sketch the ~10-line agent variant.
+For an example of orchestrating these services from pure Python (no MCP server in the middle), see [`examples/orchestrator_demo.py`](examples/orchestrator_demo.py). The same composition pattern wraps cleanly under the Claude Agent SDK; comments inside the file sketch the ~10-line agent variant.
 
 See [docs/architecture.md](docs/architecture.md) and the ADRs at [docs/adr/](docs/adr/).
 
@@ -172,7 +181,7 @@ The project follows REPL-first development: prove a pattern works in `research-m
 
 **vs. raw arXiv / PubMed API access.** Direct API calls give you XML or JSON you have to parse on every script, no rate-limit handling, no cross-source enrichment, no claim-aware citation ranking, no local recall. `research-mcp` adds adapters that already speak `Paper`, process-local rate limiters with exponential backoff and Retry-After honoring, a 24-hour disk cache, citation quality scoring, and protocol-based extension points so adding IEEE / a local PDF folder / a custom scorer is a single new class.
 
-**vs. LangChain's research tools.** LangChain bundles retrieval, prompting, and memory under a deep class hierarchy that you opt into wholesale. `research-mcp` is the retrieval and citation-quality half *only*, exposed as MCP tools — the LLM does the prompting and orchestration in whatever client you prefer (Claude Desktop, Claude Code, Cursor, Continue). Nine `typing.Protocol` abstractions instead of LangChain's BaseRetriever / BaseEmbeddings / VectorStore inheritance trees; a third-party `Source` or `CitationScorer` is a single class with no registration step.
+**vs. LangChain's research tools.** LangChain bundles retrieval, prompting, and memory under a deep class hierarchy that you opt into wholesale. `research-mcp` is the retrieval and citation-quality half *only*, exposed as MCP tools. The LLM does the prompting and orchestration in whatever client you prefer (Claude Desktop, Claude Code, Cursor, Continue). Nine `typing.Protocol` abstractions instead of LangChain's BaseRetriever / BaseEmbeddings / VectorStore inheritance trees; a third-party `Source` or `CitationScorer` is a single class with no registration step.
 
 **vs. running an LLM agent against the web.** Web search is ranked for clicks. arXiv, Semantic Scholar, PubMed, and OpenAlex are ranked for relevance against scientific literature, with citation counts and venue metadata that drive the quality scorer. The model can't do that math from web snippets.
 
@@ -182,14 +191,10 @@ Alpha. Interfaces may change before 1.0.
 
 ## Contributing
 
-PRs welcome — see [CONTRIBUTING.md](CONTRIBUTING.md) for setup, and [ROADMAP.md](ROADMAP.md) for what's on the wish list. Issues are tagged:
-
-- [`good first issue`](https://github.com/Burton-David/ResearchAssistantMCP/issues?q=label%3A%22good+first+issue%22) — scoped for a single afternoon, no deep architecture context needed
-- [`help wanted`](https://github.com/Burton-David/ResearchAssistantMCP/issues?q=label%3A%22help+wanted%22) — bigger features where the path is clear but the work isn't done
-- [`roadmap`](https://github.com/Burton-David/ResearchAssistantMCP/issues?q=label%3Aroadmap) — features tracked on the public roadmap
+PRs welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for setup, and [ROADMAP.md](ROADMAP.md) for what's on the wish list.
 
 Open a [discussion](https://github.com/Burton-David/ResearchAssistantMCP/discussions) before a large PR so the design conversation happens up front.
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT. See [LICENSE](LICENSE).

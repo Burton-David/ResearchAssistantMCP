@@ -502,9 +502,9 @@ class ExplainCitationOutput(BaseModel):
 #
 # OpenAlex is the only configured source that exposes outgoing citation
 # graphs (`referenced_works`) and similarity neighborhoods (`related_works`).
-# These tools require RESEARCH_MCP_OPENALEX_EMAIL to be set; the handler
-# refuses with a hint otherwise. `paper_id` must be an OpenAlex- or DOI-
-# prefixed id — arxiv:/s2:/pmid: ids aren't claimed by OpenAlex's resolver.
+# Neither needs OpenAlex credentials: single-work lookups cost no credits.
+# `paper_id` needs an openalex:, doi:, or arxiv: prefix; s2: and pmid: ids
+# aren't claimed by OpenAlex's resolver.
 
 
 class FindReferencedByInput(_Strict):
