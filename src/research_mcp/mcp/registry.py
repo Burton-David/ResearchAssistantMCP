@@ -61,7 +61,7 @@ class ToolSpec:
         return mcp_types.Tool(
             name=self.name,
             description=self.description,
-            inputSchema=self.input_model.model_json_schema(),
+            input_schema=self.input_model.model_json_schema(),
         )
 
 

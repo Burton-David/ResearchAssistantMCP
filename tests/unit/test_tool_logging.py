@@ -96,23 +96,15 @@ async def test_call_tool_emits_info_log_with_elapsed_and_result_count(
         library=library,
         embedder_label="test",
     )
-    # Pull the wrapped call_tool out of the server's request_handlers.
-    # The mcp SDK keys handlers by request type — find the CallToolRequest
-    # entry and synthesize a request to drive the dispatch.
-    import mcp.types as mcp_types
-
-    handler = server.request_handlers[mcp_types.CallToolRequest]
+    # Drive the real protocol path. The v2 client connects straight to a
+    # server object in memory, so dispatch, logging, and result shaping run
+    # exactly as they do over stdio — no reaching into server internals.
+    from mcp import Client
 
     async def drive() -> None:
         with caplog.at_level(logging.INFO, logger="research_mcp.mcp.server"):
-            req = mcp_types.CallToolRequest(
-                method="tools/call",
-                params=mcp_types.CallToolRequestParams(
-                    name="library_status",
-                    arguments={},
-                ),
-            )
-            await handler(req)
+            async with Client(server) as client:
+                await client.call_tool("library_status", {})
 
     await drive()
 
@@ -136,8 +128,6 @@ async def test_call_tool_surfaces_timeout_as_clean_value_error(
     Without this, Claude Desktop hits its own 4-min hard kill before
     we surface our own diagnostic."""
     import asyncio
-
-    import mcp.types as mcp_types
 
     from research_mcp.mcp.server import _TOOL_TIMEOUTS, build_server
     from research_mcp.service import DiscoveryService, SearchService
@@ -165,29 +155,20 @@ async def test_call_tool_surfaces_timeout_as_clean_value_error(
     monkey_budget = 0.05
     _TOOL_TIMEOUTS["library_status"] = monkey_budget
     try:
-        handler = server.request_handlers[mcp_types.CallToolRequest]
-        req = mcp_types.CallToolRequest(
-            method="tools/call",
-            params=mcp_types.CallToolRequestParams(
-                name="library_status",
-                arguments={},
-            ),
-        )
-        # The dispatcher converts a TimeoutError into a ValueError; the
-        # MCP SDK then surfaces ValueError as a tool-error response.
-        # We can't easily inspect the response body without going through
-        # the SDK, so we invoke the *inner* handler directly via the
-        # handlers dict — the timeout logic lives there too.
+        # The dispatcher turns a TimeoutError into an isError result rather
+        # than letting it escape as a JSON-RPC error, so the model gets text
+        # it can read and retry on. Drive it through the in-memory client to
+        # see exactly what a real client would.
+        from mcp import Client
+
         with caplog.at_level("WARNING", logger="research_mcp.mcp.server"):
-            response = await handler(req)
-        # The MCP SDK wraps tool results as ServerResult(root=CallToolResult).
-        # On error: isError=True and content carries the message text.
-        result = response.root  # type: ignore[attr-defined]
+            async with Client(server) as client:
+                result = await client.call_tool("library_status", {})
         text = "".join(
             getattr(block, "text", "")
             for block in (getattr(result, "content", None) or [])
         )
-        assert result.isError
+        assert result.is_error
         assert "timed out" in text.lower()
     finally:
         # Restore so the next test doesn't see our monkey-patched value.

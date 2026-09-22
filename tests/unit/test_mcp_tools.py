@@ -278,8 +278,6 @@ async def test_mcp_prompt_review_draft_renders_user_message() -> None:
     that bundles the right framing for assist_draft. Lock down the
     rendering shape so a refactor can't silently drop the prompt or
     change its argument contract."""
-    import mcp.types as mcp_types
-
     from research_mcp.mcp.server import build_server
     from research_mcp.service import DiscoveryService, SearchService
     from tests.conftest import StaticSource
@@ -295,28 +293,21 @@ async def test_mcp_prompt_review_draft_renders_user_message() -> None:
         embedder_label=None,
     )
 
-    list_handler = server.request_handlers[mcp_types.ListPromptsRequest]
-    list_response = await list_handler(
-        mcp_types.ListPromptsRequest(method="prompts/list", params=None)
-    )
-    prompts = list_response.root.prompts  # type: ignore[attr-defined]
-    assert len(prompts) == 1
-    assert prompts[0].name == "review_draft_for_citations"
-    assert prompts[0].arguments
-    assert prompts[0].arguments[0].name == "draft"
-    assert prompts[0].arguments[0].required is True
+    from mcp import Client
 
-    get_handler = server.request_handlers[mcp_types.GetPromptRequest]
-    response = await get_handler(
-        mcp_types.GetPromptRequest(
-            method="prompts/get",
-            params=mcp_types.GetPromptRequestParams(
-                name="review_draft_for_citations",
-                arguments={"draft": "Recent transformers outperform LSTMs."},
-            ),
+    async with Client(server) as client:
+        list_response = await client.list_prompts()
+        prompts = list_response.prompts
+        assert len(prompts) == 1
+        assert prompts[0].name == "review_draft_for_citations"
+        assert prompts[0].arguments
+        assert prompts[0].arguments[0].name == "draft"
+        assert prompts[0].arguments[0].required is True
+
+        result = await client.get_prompt(
+            "review_draft_for_citations",
+            {"draft": "Recent transformers outperform LSTMs."},
         )
-    )
-    result = response.root  # type: ignore[attr-defined]
     assert len(result.messages) == 1
     msg = result.messages[0]
     assert msg.role == "user"
@@ -325,10 +316,11 @@ async def test_mcp_prompt_review_draft_renders_user_message() -> None:
 
 
 async def test_mcp_prompt_rejects_blank_draft() -> None:
-    """Empty draft is a misuse; surface it via ValueError so the MCP
-    SDK formats a clean error response instead of feeding empty text
-    into assist_draft."""
-    import mcp.types as mcp_types
+    """Empty draft is a misuse; the prompt handler refuses it so the SDK
+    returns a clean protocol error instead of feeding empty text into
+    assist_draft."""
+    from mcp import Client
+    from mcp.shared.exceptions import MCPError
 
     from research_mcp.mcp.server import build_server
     from research_mcp.service import DiscoveryService, SearchService
@@ -343,17 +335,14 @@ async def test_mcp_prompt_rejects_blank_draft() -> None:
         library=None,
         embedder_label=None,
     )
-    get_handler = server.request_handlers[mcp_types.GetPromptRequest]
-    with pytest.raises(ValueError, match="non-empty"):
-        await get_handler(
-            mcp_types.GetPromptRequest(
-                method="prompts/get",
-                params=mcp_types.GetPromptRequestParams(
-                    name="review_draft_for_citations",
-                    arguments={"draft": "   "},
-                ),
+    # The handler raises MCPError so the reason survives the trip. A bare
+    # ValueError would reach the client as "Internal server error" with the
+    # message dropped, which is what this asserts against regressing.
+    async with Client(server) as client:
+        with pytest.raises(MCPError, match="non-empty"):
+            await client.get_prompt(
+                "review_draft_for_citations", {"draft": "   "}
             )
-        )
 
 
 def test_library_search_default_k() -> None:

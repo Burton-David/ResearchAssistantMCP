@@ -59,8 +59,8 @@ async def test_search_papers_round_trip() -> None:
             "search_papers",
             {"query": "transformer attention", "max_results": 2},
         )
-        assert not result.isError, f"tool call errored: {result}"
-        structured = result.structuredContent
+        assert not result.is_error, f"tool call errored: {result}"
+        structured = result.structured_content
         assert isinstance(structured, dict)
         assert "results" in structured
         assert isinstance(structured["results"], list)
@@ -80,8 +80,8 @@ async def test_get_paper_round_trip() -> None:
         result = await session.call_tool(
             "get_paper", {"paper_id": "arxiv:1706.03762"}
         )
-        assert not result.isError, f"tool call errored: {result}"
-        structured = result.structuredContent
+        assert not result.is_error, f"tool call errored: {result}"
+        structured = result.structured_content
         assert isinstance(structured, dict)
         assert structured["paper"]["id"] == "arxiv:1706.03762"
         assert structured["paper"]["source"] == "arxiv"
@@ -93,8 +93,8 @@ async def test_library_status_reports_test_mode_embedder() -> None:
     ) as session:
         await session.initialize()
         result = await session.call_tool("library_status", {})
-        assert not result.isError
-        structured = result.structuredContent
+        assert not result.is_error
+        structured = result.structured_content
         assert isinstance(structured, dict)
         assert structured["count"] == 0  # fresh in-memory library
         assert structured["embedder"] == "fake:test-mode"

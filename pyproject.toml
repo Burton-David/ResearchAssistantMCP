@@ -27,11 +27,9 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Information Analysis",
 ]
 dependencies = [
-    # Capped below 2.0. The 2.x line renames Tool's inputSchema field,
-    # narrows Server to a single type parameter, and moves the request
-    # decorators off Server, which breaks this server at runtime. Lift the
-    # cap together with the migration, not before it.
-    "mcp>=1.2,<2",
+    # 2.x only. The server is built with on_* constructor handlers and
+    # returns CallToolResult itself; neither works on the 1.x decorator API.
+    "mcp>=2.2,<3",
     "httpx>=0.27",
     "pydantic>=2.7",
     "faiss-cpu>=1.8",

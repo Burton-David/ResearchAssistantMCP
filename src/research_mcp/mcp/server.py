@@ -16,15 +16,20 @@ without needing API keys or a writable index path.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import time
 from collections.abc import Awaitable, Callable
+from contextvars import ContextVar
 from typing import Any, Final, Literal
 
 import mcp.types as mcp_types
 from mcp.server import Server
+from mcp.server.context import ServerRequestContext
 from mcp.server.stdio import stdio_server
+from mcp.shared.exceptions import MCPError
+from mcp.types import INVALID_PARAMS
 from pydantic import ValidationError
 
 from research_mcp import __version__
@@ -48,6 +53,7 @@ from research_mcp.embedder import (
 from research_mcp.errors import SourceUnavailable
 from research_mcp.index import FaissIndex, MemoryIndex
 from research_mcp.mcp.registry import (
+    ToolHandler,
     ToolHandlers,
     advertise,
     build_specs,
@@ -108,6 +114,13 @@ from research_mcp.sources import (
 )
 
 _log = logging.getLogger(__name__)
+
+# The request being served, published by `call_tool` for the duration of a
+# handler. v1 exposed this as ambient state on the server; v2 passes it per
+# call, and only two of the fourteen handlers want it.
+_REQUEST_CTX: ContextVar[ServerRequestContext[Any, Any] | None] = ContextVar(
+    "research_mcp_request_ctx", default=None
+)
 
 # Per-tool timeout ceilings. Claude Desktop hard-kills tool calls at
 # ~4 minutes (240s); we surface our own TIMEOUT error well before that
@@ -273,9 +286,9 @@ def _score_to_summary(score: Any) -> CitationQualityScoreSummary:
 
 
 
-def _maybe_progress_callback(
-    server: Server[Any, Any],
-) -> Callable[[int, int, str], Awaitable[None]] | None:
+def _maybe_progress_callback() -> (
+    Callable[[int, int, str], Awaitable[None]] | None
+):
     """Return a progress-notification callback bound to the active request.
 
     MCP clients opt into progress reporting by passing a `progressToken`
@@ -285,10 +298,12 @@ def _maybe_progress_callback(
     MCP clients render these as a live progress indicator on the tool
     call. Best-effort: a closed session or transport error swallows
     silently so a notification failure can't break the tool itself.
+
+    Reads the request `call_tool` published, so it returns None when
+    called outside a tool call.
     """
-    try:
-        ctx = server.request_context
-    except LookupError:
+    ctx = _REQUEST_CTX.get()
+    if ctx is None:
         return None
     meta = getattr(ctx, "meta", None)
     progress_token = getattr(meta, "progressToken", None)
@@ -551,14 +566,13 @@ def build_server(
     analysis_service: AnalysisService | None = None,
     draft_service: DraftService | None = None,
     openalex: OpenAlexSource | None = None,
-) -> Server[Any, Any]:
-    """Construct an MCP `Server` with the six research tools registered.
+) -> Server[Any]:
+    """Construct an MCP `Server` with the research tools registered.
 
     `library` may be None if no embedder is configured. In that mode the
     server still serves search/cite/get_paper/library_status; only
     ingest_paper and library_search refuse.
     """
-    server: Server[Any, Any] = Server("research-mcp", version=__version__)
 
     # ---- MCP prompt: the one canonical entry point researchers want ----
     # We ship a single prompt template rather than a wall of them. The
@@ -568,9 +582,11 @@ def build_server(
     # assist_draft and gives Claude Desktop's prompt menu an obvious
     # entry point a researcher will click before they'd type the tool
     # call by hand.
-    @server.list_prompts()  # type: ignore[no-untyped-call,untyped-decorator]
-    async def list_prompts() -> list[mcp_types.Prompt]:
-        return [
+    async def list_prompts(
+        ctx: ServerRequestContext[Any, Any],
+        params: mcp_types.PaginatedRequestParams | None = None,
+    ) -> mcp_types.ListPromptsResult:
+        return mcp_types.ListPromptsResult(prompts=[
             mcp_types.Prompt(
                 name="review_draft_for_citations",
                 description=(
@@ -590,18 +606,24 @@ def build_server(
                     ),
                 ],
             ),
-        ]
+        ])
 
-    @server.get_prompt()  # type: ignore[no-untyped-call,untyped-decorator]
     async def get_prompt(
-        name: str, arguments: dict[str, str] | None
+        ctx: ServerRequestContext[Any, Any],
+        params: mcp_types.GetPromptRequestParams,
     ) -> mcp_types.GetPromptResult:
+        name = params.name
+        arguments = params.arguments
+        # Raise MCPError rather than ValueError: the runner turns an
+        # unrecognised exception into a bare "Internal server error" and
+        # drops the message, so the client would lose the reason.
         if name != "review_draft_for_citations":
-            raise ValueError(f"unknown prompt: {name}")
+            raise MCPError(code=INVALID_PARAMS, message=f"unknown prompt: {name}")
         draft = (arguments or {}).get("draft", "")
         if not draft.strip():
-            raise ValueError(
-                "review_draft_for_citations requires non-empty `draft`."
+            raise MCPError(
+                code=INVALID_PARAMS,
+                message="review_draft_for_citations requires non-empty `draft`.",
             )
         return mcp_types.GetPromptResult(
             description=(
@@ -673,7 +695,7 @@ def build_server(
             # upsert). Stream progress when the client passed a progressToken
             # so it isn't a silent 30-60s block. Single-id mode above is
             # sub-second and doesn't bother.
-            progress_cb = _maybe_progress_callback(server)
+            progress_cb = _maybe_progress_callback()
             if progress_cb is not None:
                 await progress_cb(0, 1, f"searching for {args.query!r}...")
             outcome = await search.search(
@@ -860,7 +882,7 @@ def build_server(
                 "en_core_web_sm); a citation_service is wired by default."
             )
         args = AssistDraftInput.model_validate(arguments)
-        progress_cb = _maybe_progress_callback(server)
+        progress_cb = _maybe_progress_callback()
         recommendations = await draft_service.assist(
             args.text,
             k_per_claim=args.k_per_claim,
@@ -1062,71 +1084,118 @@ def build_server(
     )
 
     # mcp SDK ships its decorators as untyped at the moment.
-    @server.list_tools()  # type: ignore[no-untyped-call,untyped-decorator]
-    async def list_tools() -> list[mcp_types.Tool]:
-        return advertise(specs)
+    async def list_tools(
+        ctx: ServerRequestContext[Any, Any],
+        params: mcp_types.PaginatedRequestParams | None = None,
+    ) -> mcp_types.ListToolsResult:
+        return mcp_types.ListToolsResult(tools=advertise(specs))
 
     handlers = dispatch_table(specs)
 
-    # validate_input=False bypasses the mcp SDK's strict jsonschema check so
-    # pydantic — which is doing the same job inside each handler — gets first
-    # crack at the arguments. The motivation is concrete: model clients
+    # v2 hands the handler the raw params without checking them against the
+    # advertised schema, which is what this server wants: model clients
     # frequently serialize numeric tool args as JSON strings ("2018" instead
     # of 2018). jsonschema rejects those as type-mismatched; pydantic's
     # default lax mode coerces them. extra="forbid" on each Input model still
     # bounces hallucinated unknown keys, so we don't lose schema strictness.
-    @server.call_tool(validate_input=False)  # type: ignore[untyped-decorator]  # mcp SDK decorators are untyped
-    async def call_tool(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
-        handler = handlers.get(name)
-        if handler is None:
-            raise ValueError(f"unknown tool: {name}")
+    async def call_tool(
+        ctx: ServerRequestContext[Any, Any],
+        params: mcp_types.CallToolRequestParams,
+    ) -> mcp_types.CallToolResult:
+        name = params.name
+        arguments = dict(params.arguments or {})
+        # v1 read the active request off the server as ambient state, which
+        # is how the progress helper found the client's progressToken. v2
+        # passes it per call, so publish it for the duration of the handler
+        # rather than thread an unused argument through all fourteen.
+        token = _REQUEST_CTX.set(ctx)
+        try:
+            return await _run_tool(name, arguments, handlers)
+        finally:
+            _REQUEST_CTX.reset(token)
+
+    return Server(
+        "research-mcp",
+        version=__version__,
+        on_list_prompts=list_prompts,
+        on_get_prompt=get_prompt,
+        on_list_tools=list_tools,
+        on_call_tool=call_tool,
+    )
+
+
+async def _run_tool(
+    name: str,
+    arguments: dict[str, Any],
+    handlers: dict[str, ToolHandler],
+) -> mcp_types.CallToolResult:
+    """Run one tool call: budget it, log it, and shape the result.
+
+    v1 turned an exception raised here into an `isError` result on the
+    client's behalf. v2 lets it become a JSON-RPC error instead, which
+    would surface to the model as a protocol failure rather than something
+    it can read and retry, so the error text is packed into an `isError`
+    result explicitly.
+    """
+    handler = handlers.get(name)
+    if handler is None:
+        return _tool_error(f"unknown tool: {name}")
         # Log every call: name, arg keys (not values — args may be large
         # queries or paper bodies), elapsed ms, result-shape hint. The next
         # agent debugging an issue should be able to grep the Claude Desktop
         # log for tool=cite_paper and reconstruct the call sequence.
-        arg_keys = ",".join(sorted(arguments.keys())) or "-"
-        start = time.monotonic()
-        budget = _TOOL_TIMEOUTS.get(name, _DEFAULT_TOOL_TIMEOUT)
-        try:
-            result = await asyncio.wait_for(handler(arguments), timeout=budget)
-        except TimeoutError as exc:
-            elapsed_ms = (time.monotonic() - start) * 1000
-            _log.warning(
-                "tool=%s args=%s elapsed=%.0fms timeout_after=%.0fs",
-                name, arg_keys, elapsed_ms, budget,
-            )
-            raise ValueError(
-                f"{name} timed out after {budget:.0f}s. This is usually "
-                "an upstream rate limit or LLM API slowdown — try again "
-                "in a moment, or simplify the query."
-            ) from exc
-        except ValidationError as exc:
-            # Pydantic's default __str__ embeds a docs URL
-            # (https://errors.pydantic.dev/...) in the message. That leaks
-            # framework noise to the LLM client — same class of leakage we
-            # cleaned out of the SourceUnavailable path. Reformat to a
-            # clean "field: message" line and drop the URL.
-            elapsed_ms = (time.monotonic() - start) * 1000
-            _log.warning(
-                "tool=%s args=%s elapsed=%.0fms validation_error",
-                name, arg_keys, elapsed_ms,
-            )
-            raise ValueError(_format_validation_error(name, exc)) from exc
-        except Exception as exc:
-            elapsed_ms = (time.monotonic() - start) * 1000
-            _log.warning(
-                "tool=%s args=%s elapsed=%.0fms error=%s: %s",
-                name, arg_keys, elapsed_ms, type(exc).__name__, exc,
-            )
-            raise
+    arg_keys = ",".join(sorted(arguments.keys())) or "-"
+    start = time.monotonic()
+    budget = _TOOL_TIMEOUTS.get(name, _DEFAULT_TOOL_TIMEOUT)
+    try:
+        result = await asyncio.wait_for(handler(arguments), timeout=budget)
+    except TimeoutError:
         elapsed_ms = (time.monotonic() - start) * 1000
-        _log.info(
-            "tool=%s args=%s elapsed=%.0fms results=%s",
-            name, arg_keys, elapsed_ms, _result_hint(name, result),
+        _log.warning(
+            "tool=%s args=%s elapsed=%.0fms timeout_after=%.0fs",
+            name, arg_keys, elapsed_ms, budget,
         )
-        return result
+        return _tool_error(
+            f"{name} timed out after {budget:.0f}s. This is usually "
+            "an upstream rate limit or LLM API slowdown — try again "
+            "in a moment, or simplify the query."
+        )
+    except ValidationError as exc:
+        # Pydantic's default __str__ embeds a docs URL
+        # (https://errors.pydantic.dev/...) in the message. That leaks
+        # framework noise to the LLM client — same class of leakage we
+        # cleaned out of the SourceUnavailable path. Reformat to a
+        # clean "field: message" line and drop the URL.
+        elapsed_ms = (time.monotonic() - start) * 1000
+        _log.warning(
+            "tool=%s args=%s elapsed=%.0fms validation_error",
+            name, arg_keys, elapsed_ms,
+        )
+        return _tool_error(_format_validation_error(name, exc))
+    except Exception as exc:
+        elapsed_ms = (time.monotonic() - start) * 1000
+        _log.warning(
+            "tool=%s args=%s elapsed=%.0fms error=%s: %s",
+            name, arg_keys, elapsed_ms, type(exc).__name__, exc,
+        )
+        return _tool_error(str(exc))
+    elapsed_ms = (time.monotonic() - start) * 1000
+    _log.info(
+        "tool=%s args=%s elapsed=%.0fms results=%s",
+        name, arg_keys, elapsed_ms, _result_hint(name, result),
+    )
+    return mcp_types.CallToolResult(
+        content=[mcp_types.TextContent(type="text", text=json.dumps(result))],
+        structured_content=result,
+    )
 
-    return server
+
+def _tool_error(message: str) -> mcp_types.CallToolResult:
+    """An `isError` result carrying text the model can read and act on."""
+    return mcp_types.CallToolResult(
+        content=[mcp_types.TextContent(type="text", text=message)],
+        is_error=True,
+    )
 
 
 def _format_validation_error(tool_name: str, exc: ValidationError) -> str:
